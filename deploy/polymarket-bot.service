@@ -1,0 +1,22 @@
+[Unit]
+Description=Polymarket Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=kevi
+WorkingDirectory=/home/kevi/polymarket-bot
+Environment=PYTHONPATH=/home/kevi/polymarket-bot
+ExecStart=/home/kevi/polymarket-bot/.venv/bin/python main.py --profile latency
+Restart=on-failure
+RestartSec=10
+# Kill entire process group on stop/restart — prevents orphaned child processes
+# that caused two instances to run simultaneously
+KillMode=control-group
+TimeoutStopSec=15
+StandardOutput=append:/home/kevi/polymarket-bot/logs/bot.log
+StandardError=append:/home/kevi/polymarket-bot/logs/bot.log
+SyslogIdentifier=polymarket-bot
+
+[Install]
+WantedBy=multi-user.target

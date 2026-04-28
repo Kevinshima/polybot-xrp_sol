@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Polymarket Bot</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<div id="halted-banner" class="halted-banner">
+  ⚠ BOT HALTED — Daily loss cap breached or kill switch activated
+</div>
+
+<header>
+  <h1>⬡ Polymarket Bot</h1>
+  <span id="connection-status">○ Connecting…</span>
+  <button class="kill-btn" id="kill-btn">⏹ Kill Switch</button>
+  <button class="resume-btn" id="resume-btn">▶ Resume</button>
+</header>
+
+<!-- Metrics row -->
+<div class="grid">
+  <div class="card">
+    <div class="label">Daily PnL</div>
+    <div class="value neutral" id="daily-pnl">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Cumulative PnL</div>
+    <div class="value neutral" id="cumulative-pnl">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Open Positions Value</div>
+    <div class="value neutral" id="open-value">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Win Rate</div>
+    <div class="value neutral" id="win-rate">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Total Trades</div>
+    <div class="value neutral" id="total-trades">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Open Orders</div>
+    <div class="value neutral" id="open-orders">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Daily Loss / Cap</div>
+    <div class="value neutral" id="daily-loss">—</div>
+  </div>
+</div>
+
+<!-- Strategy status -->
+<div class="section" id="strategies-section">
+  <h2>Strategies</h2>
+  <div id="strategy-status"></div>
+</div>
+
+<div id="sentiment-priority-anchor"></div>
+
+<!-- Analytics panel -->
+<div class="section" id="chart-section">
+  <div class="analytics-header">
+    <h2>Analytics</h2>
+    <div class="time-tabs">
+      <button class="time-tab active" data-range="all">All Time</button>
+      <button class="time-tab" data-range="7d">7 Days</button>
+      <button class="time-tab" data-range="today">Today</button>
+    </div>
+  </div>
+
+  <!-- Equity curve -->
+  <div id="equity-container">
+    <canvas id="equity-chart"></canvas>
+  </div>
+
+  <!-- Mini charts row -->
+  <div class="mini-charts-row">
+    <div class="mini-chart-card">
+      <div class="mini-chart-label">Daily P&amp;L</div>
+      <div class="mini-chart-box"><canvas id="daily-chart"></canvas></div>
+    </div>
+    <div class="mini-chart-card">
+      <div class="mini-chart-label">By Asset</div>
+      <div class="mini-chart-box"><canvas id="asset-chart"></canvas></div>
+    </div>
+    <div class="mini-chart-card">
+      <div class="mini-chart-label">By Timeframe</div>
+      <div class="mini-chart-box"><canvas id="timeframe-chart"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- Open positions -->
+<div class="section" id="positions-section">
+  <h2>Open Positions</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Strategy</th>
+        <th>Market</th>
+        <th>Side</th>
+        <th>Size</th>
+        <th>Entry</th>
+        <th>Current</th>
+        <th>Unrealized PnL</th>
+      </tr>
+    </thead>
+    <tbody id="positions-tbody">
+      <tr><td colspan="7" style="color:var(--muted);text-align:center">Loading…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Recent orders -->
+<div class="section" id="orders-section">
+  <h2>Recent Orders</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Strategy</th>
+        <th>Market</th>
+        <th>Side</th>
+        <th>Price</th>
+        <th>Status</th>
+        <th>PnL</th>
+      </tr>
+    </thead>
+    <tbody id="orders-tbody">
+      <tr><td colspan="7" style="color:var(--muted);text-align:center">Loading…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Synth Arb panel (visible when SYNTH_ARB_ENABLED=true) -->
+<div class="section" id="synth-section" style="display:none">
+  <h2>Synth Arb</h2>
+  <div class="grid" id="synth-metrics-grid">
+    <div class="card">
+      <div class="label">Daily PnL</div>
+      <div class="value neutral" id="synth-daily-pnl">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Cumulative PnL</div>
+      <div class="value neutral" id="synth-cumulative-pnl">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Open Positions</div>
+      <div class="value neutral" id="synth-open-count">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Total Trades</div>
+      <div class="value neutral" id="synth-total-trades">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Win Rate</div>
+      <div class="value neutral" id="synth-win-rate">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Avg Gap Captured</div>
+      <div class="value neutral" id="synth-avg-gap">—</div>
+    </div>
+  </div>
+  <table id="synth-positions-table" style="display:none">
+    <thead>
+      <tr>
+        <th>Market</th>
+        <th>YES Entry</th>
+        <th>NO Entry</th>
+        <th>Cost</th>
+        <th>Payout</th>
+        <th>Gap %</th>
+        <th>Age</th>
+      </tr>
+    </thead>
+    <tbody id="synth-positions-tbody">
+      <tr><td colspan="7" style="color:var(--muted);text-align:center">No open positions</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Log viewer -->
+<div class="section" id="logs-section">
+  <h2>Recent Logs</h2>
+  <div id="log-box">Loading…</div>
+</div>
+
+<div id="sentiment-default-anchor"></div>
+
+<!-- Sentiment tab (visible when running sentiment profile) -->
+<div class="section" id="sentiment-section" style="display:none">
+  <h2>AI Sentiment</h2>
+
+  <div class="sentiment-card-grid">
+    <div class="card">
+      <div class="label">Profile</div>
+      <div class="value neutral" id="sent-profile">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Analyzer</div>
+      <div class="value neutral" id="sent-analyzer">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Anthropic Key</div>
+      <div class="value neutral" id="sent-anthropic">—</div>
+    </div>
+    <div class="card">
+      <div class="label">NewsAPI Key</div>
+      <div class="value neutral" id="sent-newsapi">—</div>
+    </div>
+  </div>
+
+  <div class="sentiment-grid">
+    <div class="sentiment-panel">
+      <h3>Recent News</h3>
+      <div class="sentiment-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Published</th>
+              <th>Source</th>
+              <th>Title</th>
+              <th>Themes</th>
+            </tr>
+          </thead>
+          <tbody id="sent-news-tbody">
+            <tr><td colspan="4" style="color:var(--muted);text-align:center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="sentiment-panel">
+      <h3>Decisions</h3>
+      <div class="sentiment-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Price</th>
+              <th>Fair</th>
+              <th>Edge</th>
+              <th>Decision</th>
+              <th>Skip Reason</th>
+            </tr>
+          </thead>
+          <tbody id="sent-decisions-tbody">
+            <tr><td colspan="6" style="color:var(--muted);text-align:center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="sentiment-grid">
+    <div class="sentiment-panel">
+      <h3>Funnel</h3>
+      <div class="sentiment-card-grid sentiment-funnel-grid">
+        <div class="card">
+          <div class="label">Headlines Seen</div>
+          <div class="value neutral" id="sent-seen">—</div>
+        </div>
+        <div class="card">
+          <div class="label">Relevant</div>
+          <div class="value neutral" id="sent-relevant">—</div>
+        </div>
+        <div class="card">
+          <div class="label">Mapped</div>
+          <div class="value neutral" id="sent-mapped">—</div>
+        </div>
+        <div class="card">
+          <div class="label">Traded</div>
+          <div class="value neutral" id="sent-traded">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sentiment-panel">
+      <h3>Paper PnL By Horizon</h3>
+      <div class="sentiment-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Horizon</th>
+              <th>Eligible Trades</th>
+              <th>Total PnL</th>
+              <th>Avg PnL</th>
+              <th>Win Rate</th>
+            </tr>
+          </thead>
+          <tbody id="sent-horizons-tbody">
+            <tr><td colspan="5" style="color:var(--muted);text-align:center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="sentiment-grid">
+    <div class="sentiment-panel">
+      <h3>By Source</h3>
+      <div class="sentiment-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Trades</th>
+              <th>Total PnL</th>
+              <th>Avg PnL</th>
+              <th>Win Rate</th>
+            </tr>
+          </thead>
+          <tbody id="sent-source-tbody">
+            <tr><td colspan="5" style="color:var(--muted);text-align:center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="sentiment-panel">
+      <h3>By Theme</h3>
+      <div class="sentiment-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Theme</th>
+              <th>Trades</th>
+              <th>Total PnL</th>
+              <th>Avg PnL</th>
+              <th>Win Rate</th>
+            </tr>
+          </thead>
+          <tbody id="sent-theme-tbody">
+            <tr><td colspan="5" style="color:var(--muted);text-align:center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="height:32px"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,893 @@
+themes:
+  middle_east_war:
+    enabled: true
+    weight: 0.90
+    news_trading_disabled: true
+    scanner_disabled: true
+    description: "Military conflict, airstrikes, ground operations in Middle East — Gaza war, Lebanon, Iran"
+    keywords: [israel, gaza, hamas, idf, airstrike, ground invasion, hostages,
+               rafah, hezbollah, lebanon, west bank, settler, occupation,
+               iron dome, missile, rocket, ceasefire, killed, wounded, civilian,
+               netanyahu, idf operation, gaza war, israel war, middle east war]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      # Current active conflict markets (Israel-Hezbollah resolved Dec 2024 — use Gaza/Iran markets)
+      - query: "Gaza war"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "Trump ends Gaza"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "hostage deal"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "Israel Iran"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: reaction
+        priority: 0.85
+      - query: "US x Iran ceasefire"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+      - query: "israel military"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: reaction
+        priority: 0.70
+    market_tags: [israel, gaza, war, middle east, ceasefire, iran, hostages]
+
+  iran_conflict:
+    enabled: true
+    weight: 1.00
+    news_trading_disabled: true
+    scanner_disabled: true
+    description: "Iran military actions, nuclear program, US-Iran tensions"
+    keywords: [iran, tehran, irgc, nuclear, uranium, enrichment, sanctions,
+               strait of hormuz, proxy, houthi, yemen, red sea, tanker attack,
+               us strike, israel strike iran, missile barrage, drone attack]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      # Catch-all: ANY Iran news searches for ceasefire/meeting/blockade markets
+      - query: "US x Iran ceasefire"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "US x Iran meeting"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "Iran nuclear deal"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "US Iran blockade"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: reaction
+        priority: 0.85
+      - query: "Donald Trump announce end"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+    market_tags: [iran, nuclear, houthi, sanctions, ceasefire, blockade]
+
+  ceasefire_deal:
+    enabled: true
+    weight: 0.60
+    news_trading_disabled: true
+    description: "Ceasefire negotiations, hostage deals, peace talks"
+    keywords: [ceasefire, hostage deal, truce, negotiation, qatar mediator,
+               egypt mediator, hamas deal, prisoner exchange, pause fighting,
+               humanitarian corridor, aid delivery, peace agreement]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary]
+    strict_market_queries:
+      - query: "ceasefire deal"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "hostage deal"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "Israel ceasefire"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+    market_tags: [ceasefire, hostages, deal, diplomacy]
+
+  regional_escalation:
+    enabled: true
+    weight: 0.55
+    news_trading_disabled: true
+    scanner_disabled: true
+    description: "Wider regional escalation, US military involvement, bases attacked"
+    keywords: [us base attacked, troops deployed, aircraft carrier, b52,
+               jordan base, syria strike, iraq militia, escalation, world war,
+               nato involvement, us retaliation, us strike, regional war]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action]
+    strict_market_queries:
+      - query: "US strike Iran"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action]
+        action_tags: []
+        trade_type: reaction
+        priority: 0.90
+      - query: "US military action"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action]
+        action_tags: []
+        trade_type: reaction
+        priority: 0.85
+      - query: "houthi attack"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action]
+        action_tags: []
+        trade_type: reaction
+        priority: 0.80
+    market_tags: [escalation, us military, regional war]
+
+  us_politics:
+    enabled: true
+    weight: 0.70
+    description: "US domestic politics, executive orders, tariffs, Trump decisions"
+    keywords: ["federal reserve", "interest rate", "tariff", "trump", "congress",
+               "fed decision", "trade war", "nato", "recession", "sanctions",
+               "executive order", "white house", "president", "senate", "house"]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      - query: "trump tariff"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "trump executive order"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "US trade deal"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "trump approval rating"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+    market_tags: [us_economy, fed, tariff, trump, politics]
+
+  geopolitics_china:
+    enabled: true
+    weight: 0.55
+    news_trading_disabled: true
+    scanner_disabled: true
+    description: "China geopolitical risk, Taiwan, US-China trade tensions"
+    keywords: [china, taiwan, "xi jinping", "south china sea", PLA, beijing,
+               "strait of taiwan", "china trade", "china tariff", "china economy",
+               "china sanctions", "china export", "chip ban", "semiconductor"]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      - query: "US China trade deal"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "china tariff"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "china taiwan"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: reaction
+        priority: 0.85
+      - query: "china economic"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.75
+    market_tags: [china, taiwan, geopolitics, trade]
+
+  iran_diplomacy:
+    enabled: true
+    weight: 0.50
+    news_trading_disabled: true
+    scanner_disabled: true
+    description: "Iran diplomatic negotiations and economic normalization"
+    keywords: ["iran nuclear", JCPOA, witkoff, diplomatic, sanctions, hormuz, negotiate, ceasefire,
+               "iran deal", "iran talks", "iran president", "iran foreign minister"]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary]
+    strict_market_queries:
+      - query: "US x Iran meeting"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "US and Iran talks"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "iran nuclear deal"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "US x Iran ceasefire"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "Hormuz strait"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+    market_tags: [iran_diplomacy, nuclear, sanctions, ceasefire, hormuz]
+
+  crypto_markets:
+    enabled: true
+    weight: 0.75
+    description: "Bitcoin and crypto price milestones, crypto regulation, ETF approvals"
+    keywords: [bitcoin, btc, ethereum, eth, crypto, cryptocurrency, "crypto regulation",
+               "bitcoin etf", "crypto etf", "sec crypto", "coinbase", "binance",
+               "bitcoin halving", "btc price", "eth price", "altcoin", "solana", "stablecoin",
+               "crypto ban", "cbdc", "digital asset", "blockchain regulation"]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      # Catch-all: ANY crypto news searches for short-term bitcoin price markets
+      - query: "bitcoin above"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "BTC end of"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "bitcoin this week"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "ethereum above"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "crypto regulation"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "bitcoin ETF"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+      - query: "solana price"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.75
+    market_tags: [bitcoin, ethereum, crypto, btc, eth, solana]
+
+  us_economy:
+    enabled: true
+    weight: 0.70
+    bypass_mapping: true
+    description: "US economic indicators — Fed rate decisions, inflation, recession, jobs"
+    keywords: ["federal reserve", "interest rate", "rate cut", "rate hike", "inflation",
+               "cpi", "pce", "gdp", "recession", "unemployment", "jobs report", "nonfarm",
+               "jerome powell", "fed chair", "fomc", "basis points", "yield curve",
+               "debt ceiling", "us deficit", "treasury", "10-year yield", "stagflation"]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      - query: "fed rate cut"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "fed rate decision"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "US recession"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "fed interest rate"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "US unemployment"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+      - query: "inflation CPI"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+    market_tags: [fed, interest_rate, recession, inflation, economy]
+
+  geopolitics:
+    enabled: true
+    weight: 0.70
+    description: "Russia-Ukraine war, NATO, global conflicts and peace deals"
+    keywords: [russia, ukraine, zelensky, putin, nato, kyiv, moscow, war, ceasefire,
+               peace deal, peace talks, troops, offensive, sanctions, nuclear threat,
+               finland, sweden, moldova, belarus, crimea, donbas, kherson]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      - query: "Russia Ukraine ceasefire"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "Ukraine war"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "Russia Ukraine"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "Trump ends Ukraine"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "NATO expansion"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action]
+        action_tags: []
+        trade_type: event
+        priority: 0.75
+    market_tags: [russia, ukraine, war, nato, ceasefire, peace]
+
+  sports_events:
+    enabled: true
+    weight: 0.65
+    bypass_mapping: true
+    description: "Major sports outcomes — NBA playoffs, Premier League, UFC, Champions League"
+    keywords: [nba, playoffs, championship, premier league, champions league, ufc,
+               fight, match, game, final, series, score, winner, defeated, upset,
+               "super bowl", "world series", nfl, mlb, nhl, soccer, football,
+               basketball, boxing, tennis, "grand slam", wimbledon, "us open"]
+    market_ids: []
+    allowed_catalyst_classes: [confirmed_event, official_catalyst, commentary, analysis]
+    strict_market_queries:
+      # NBA Playoffs — 165 active markets right now
+      - query: "NBA playoffs"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "NBA winner"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      # Champions League — 122 active markets
+      - query: "Champions League"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      # Premier League — 38 active markets
+      - query: "Premier League"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "UFC fight"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "MLB game"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+      - query: "NBA playoffs"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+      # NBA play-in — high activity, short resolution
+      - query: "NBA Play-In"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "NBA first round"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: [nba, basketball, playoffs]
+        trade_type: event
+        priority: 0.85
+      - query: "advance playoffs"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: [nba, basketball, series]
+        trade_type: event
+        priority: 0.85
+      # Champions League knockouts — team-specific queries
+      - query: "Champions League semi"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "Champions League final"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "Arsenal Champions League"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: [arsenal]
+        trade_type: event
+        priority: 0.85
+      - query: "Liverpool Champions League"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: [liverpool]
+        trade_type: event
+        priority: 0.85
+      - query: "Man City Champions League"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: ["man city", manchester]
+        trade_type: event
+        priority: 0.85
+      - query: "Real Madrid Champions League"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: ["real madrid"]
+        trade_type: event
+        priority: 0.85
+      - query: "Barcelona advance"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: [barcelona]
+        trade_type: event
+        priority: 0.80
+      # Premier League title race
+      - query: "Premier League winner"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: [premier league, title, championship]
+        trade_type: event
+        priority: 0.80
+      # NFL/MLB/NHL season outcomes
+      - query: "NHL playoffs"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: [nhl, hockey]
+        trade_type: event
+        priority: 0.80
+      - query: "NFL Super Bowl"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: [nfl, football, super bowl]
+        trade_type: event
+        priority: 0.80
+    market_tags: [sports, nba, soccer, ufc, playoffs, champions league]
+
+  tech_companies:
+    enabled: true
+    weight: 0.75
+    bypass_mapping: true
+    news_trading_disabled: true
+    description: "Big tech earnings, AI developments, SpaceX launches, antitrust rulings"
+    keywords: [apple, tesla, nvidia, microsoft, google, meta, amazon, spacex, openai,
+               "ai regulation", "artificial intelligence", earnings, antitrust,
+               "chip ban", semiconductor, "tech stocks", "nasdaq", IPO, "stock split",
+               ChatGPT, Gemini, "AI model", "data center", "cloud computing"]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      - query: "Apple earnings"
+        catalyst_types: [official_catalyst, confirmed_event, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "Tesla stock"
+        catalyst_types: [official_catalyst, confirmed_event, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "nvidia earnings"
+        catalyst_types: [official_catalyst, confirmed_event, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "SpaceX launch"
+        catalyst_types: [confirmed_event, official_catalyst]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "AI regulation"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "OpenAI"
+        catalyst_types: [official_catalyst, confirmed_event, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "Google antitrust"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "Microsoft earnings"
+        catalyst_types: [official_catalyst, confirmed_event, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+    market_tags: [tech, apple, tesla, nvidia, ai, spacex, earnings, antitrust]
+
+  entertainment:
+    enabled: false
+    weight: 0.55
+    bypass_mapping: true
+    description: "Award shows, box office records, TV renewals, celebrity events"
+    keywords: [oscar, grammy, emmy, tony, bafta, "golden globe", "box office",
+               netflix, disney, "movie release", "film award", "best picture",
+               "best actor", "best director", "music award", "album of the year",
+               "streaming", "season renewal", "cancelled show", "record breaking"]
+    market_ids: []
+    allowed_catalyst_classes: [confirmed_event, official_catalyst, commentary, analysis]
+    strict_market_queries:
+      - query: "Oscar winner"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "Grammy winner"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "Emmy award"
+        catalyst_types: [confirmed_event, official_catalyst, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "box office"
+        catalyst_types: [confirmed_event, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+      - query: "Netflix show"
+        catalyst_types: [confirmed_event, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.75
+    market_tags: [oscars, grammys, emmys, box_office, netflix, awards]
+
+  global_elections:
+    enabled: true
+    weight: 0.80
+    bypass_mapping: true
+    news_trading_disabled: true
+    description: "Elections and political leadership changes worldwide"
+    keywords: [election, vote, poll, candidate, ballot, "prime minister", president,
+               "general election", "snap election", "coalition", "majority",
+               "parliament", "seats won", "polling", "approval", "resign",
+               uk, france, germany, canada, india, brazil, japan, australia,
+               "labour party", "conservative", "liberal", "left wing", "right wing"]
+    market_ids: []
+    allowed_catalyst_classes: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+    strict_market_queries:
+      - query: "UK election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "Germany election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "France election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "Canada election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "India election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "EU election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "Japan election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+      - query: "Brazil election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+      - query: "Australia election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: []
+        trade_type: event
+        priority: 0.75
+      - query: "Bulgaria election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: [bulgaria, bulgarian]
+        trade_type: event
+        priority: 0.75
+      - query: "Turkey election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: [turkey, turkish, erdogan]
+        trade_type: event
+        priority: 0.75
+      - query: "Poland election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: [poland, polish]
+        trade_type: event
+        priority: 0.75
+      - query: "Philippines election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: [philippines, filipino]
+        trade_type: event
+        priority: 0.75
+      - query: "Spain election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: [spain, spanish]
+        trade_type: event
+        priority: 0.75
+      - query: "Mexico election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: [mexico, mexican]
+        trade_type: event
+        priority: 0.75
+      - query: "Italy election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: [italy, italian]
+        trade_type: event
+        priority: 0.75
+      - query: "South Korea election"
+        catalyst_types: [official_catalyst, confirmed_event, policy_action, commentary, analysis]
+        action_tags: ["south korea", korean]
+        trade_type: event
+        priority: 0.75
+      # Generic catch-all for unlisted countries
+      - query: "election results"
+        catalyst_types: [confirmed_event, official_catalyst]
+        action_tags: [election, results, seats, won, majority, parliament]
+        trade_type: event
+        priority: 0.70
+      - query: "election winner"
+        catalyst_types: [confirmed_event, official_catalyst]
+        action_tags: [election, winner, wins, won, victory]
+        trade_type: event
+        priority: 0.70
+    market_tags: [election, vote, uk, france, germany, canada, india, eu, global]
+
+  weather:
+    enabled: true
+    weight: 0.85
+    bypass_mapping: true
+    news_trading_disabled: true
+    description: "Daily weather outcomes — temperature records, rainfall, snowfall in major cities"
+    keywords: [rain, snow, temperature, forecast, weather, heat, cold, freeze,
+               celsius, fahrenheit, degrees, precipitation, snowfall, blizzard,
+               storm, flood, drought, humidity, wind, sunny, cloudy]
+    market_ids: []
+    allowed_catalyst_classes: [confirmed_event, data_forecast]
+    strict_market_queries:
+      - query: "will it rain"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 1.00
+      - query: "temperature high"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "will it snow"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.95
+      - query: "degrees fahrenheit"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "rain in city"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "temperature exceed"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.90
+      - query: "below freezing"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "heat wave"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "snowfall inches"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.85
+      - query: "rainfall mm"
+        catalyst_types: [confirmed_event, data_forecast]
+        action_tags: []
+        trade_type: event
+        priority: 0.80
+    market_tags: [weather, rain, snow, temperature, forecast, city]
+
+strategy_params:
+  min_token_price: 0.25
+  max_token_price: 0.88
+  # Dead zone only applies to LLM trades — direct-math bypasses this filter entirely
+  dead_zone_low: 0.40
+  dead_zone_high: 0.50
+  thesis_invalidation_pct: 0.12
+  thesis_invalid_min_age_secs: 900
+  # Fix 9: Initial Kelly cap — overridden dynamically once enough trades accumulate
+  kelly_initial_cap_usdc: 8.0
+
+news_sources:
+  newsapi_enabled: true
+  rss_enabled: true
+  blocked_categories: []
+  blocked_source_keywords: [espn]
+  rss_feeds:
+    # World / Breaking
+    - name: reuters_world
+      url: "https://feeds.reuters.com/reuters/worldnews"
+    - name: bbc_world
+      url: "https://feeds.bbci.co.uk/news/world/rss.xml"
+    - name: al_jazeera
+      url: "https://www.aljazeera.com/xml/rss/all.xml"
+    - name: ap_top
+      url: "https://apnews.com/rss/apf-topnews"
+      category: general
+    - name: reuters_top
+      url: "https://feeds.reuters.com/reuters/topNews"
+      category: general
+    - name: guardian_world
+      url: "https://www.theguardian.com/world/rss"
+      category: general
+    - name: npr_news
+      url: "https://feeds.npr.org/1001/rss.xml"
+      category: general
+    - name: axios_world
+      url: "https://api.axios.com/feed/"
+      category: general
+    # Middle East / Geopolitics
+    - name: times_of_israel
+      url: "https://www.timesofisrael.com/feed/"
+    - name: jerusalem_post
+      url: "https://www.jpost.com/Rss/RssFeedsHeadlines.aspx"
+      category: middle_east
+    - name: middle_east_eye
+      url: "https://www.middleeasteye.net/rss"
+      category: middle_east
+    # US Politics
+    - name: politico_politics
+      url: "https://rss.politico.com/politics-news.xml"
+      category: politics
+    - name: politico_whitehouse
+      url: "https://rss.politico.com/whitehouse.xml"
+      category: politics
+    - name: thehill_news
+      url: "https://thehill.com/news/feed/"
+      category: politics
+    - name: axios_politics
+      url: "https://api.axios.com/feed/politics"
+      category: politics
+    # Economics / Finance
+    - name: reuters_business
+      url: "https://feeds.reuters.com/reuters/businessNews"
+      category: economics
+    - name: cnbc_economy
+      url: "https://search.cnbc.com/rs/search/combinedcma/version/1/from/0/size/10/render/rss/articletype/1/output/rss/item_type/story?source=CNBC&q=economy+fed+rates"
+      category: economics
+    - name: cnbc_markets
+      url: "https://search.cnbc.com/rs/search/combinedcma/version/1/from/0/size/10/render/rss/articletype/1/output/rss/item_type/story?source=CNBC&q=markets+stocks+trading"
+      category: economics
+    - name: ft_markets
+      url: "https://www.ft.com/markets?format=rss"
+      category: economics
+    - name: wsj_economy
+      url: "https://feeds.content.dowjones.io/public/rss/mw_topstories"
+      category: economics
+    # Crypto
+    - name: coindesk
+      url: "https://www.coindesk.com/arc/outboundfeeds/rss/"
+      category: crypto
+    - name: cointelegraph
+      url: "https://cointelegraph.com/rss"
+      category: crypto
+    - name: decrypt_crypto
+      url: "https://decrypt.co/feed"
+      category: crypto
+    - name: bitcoin_magazine
+      url: "https://bitcoinmagazine.com/.rss/full/"
+      category: crypto
+    # Sports
+    - name: bbc_sport
+      url: "https://feeds.bbci.co.uk/sport/rss.xml"
+      category: sports
+    - name: espn_nba
+      url: "https://www.espn.com/espn/rss/nba/news"
+      category: sports
+    # Tech
+    - name: techcrunch
+      url: "https://techcrunch.com/feed/"
+      category: tech
+    - name: the_verge
+      url: "https://www.theverge.com/rss/index.xml"
+      category: tech
+    - name: ars_technica
+      url: "https://feeds.arstechnica.com/arstechnica/index"
+      category: tech
+    # Entertainment
+    - name: variety
+      url: "https://variety.com/feed/"
+      category: entertainment
+    - name: deadline
+      url: "https://deadline.com/feed/"
+      category: entertainment
+    # Global Politics
+    - name: bbc_uk
+      url: "https://feeds.bbci.co.uk/news/uk/rss.xml"
+      category: global_politics
+    - name: guardian_politics
+      url: "https://www.theguardian.com/politics/rss"
+      category: global_politics
+    - name: euronews
+      url: "https://feeds.feedburner.com/euronews/en/home"
+      category: global_politics
