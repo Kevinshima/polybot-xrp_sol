@@ -13,27 +13,36 @@ from utils.logger import logger
 
 
 # Maps internal symbol → Binance aggTrade stream URL
+# SOL/USDT and XRP/USDT are the primary trading feeds.
+# BTC/USDT is kept as a cross-asset momentum validator (never traded directly).
 _BINANCE_STREAMS = {
+    "SOL/USDT": "wss://stream.binance.com:9443/ws/solusdt@aggTrade",
+    "XRP/USDT": "wss://stream.binance.com:9443/ws/xrpusdt@aggTrade",
     "BTC/USDT": "wss://stream.binance.com:9443/ws/btcusdt@aggTrade",
-    "ETH/USDT": "wss://stream.binance.com:9443/ws/ethusdt@aggTrade",
 }
 
 # Binance order book depth streams — top-20 levels updated every 1 second
 _BINANCE_OB_STREAMS = {
+    "SOL/USDT": "wss://stream.binance.com:9443/ws/solusdt@depth20@1000ms",
+    "XRP/USDT": "wss://stream.binance.com:9443/ws/xrpusdt@depth20@1000ms",
     "BTC/USDT": "wss://stream.binance.com:9443/ws/btcusdt@depth20@1000ms",
-    "ETH/USDT": "wss://stream.binance.com:9443/ws/ethusdt@depth20@1000ms",
 }
 
 # Maps internal symbol → (Kraken query pair, Kraken result key)
 _KRAKEN_PAIRS = {
+    "SOL/USDT": ("SOLUSD", "SOLUSD"),
+    "XRP/USDT": ("XRPUSD", "XXRPZUSD"),
     "BTC/USDT": ("XBTUSD", "XXBTZUSD"),
-    "ETH/USDT": ("ETHUSD", "XETHZUSD"),
 }
 
 _FALLBACK_TIMEOUT = 10.0   # seconds before activating Kraken fallback
 _FALLBACK_INTERVAL = 10.0  # Kraken poll interval when fallback is active
 _RECONNECT_DELAY = 5.0     # seconds to wait before WebSocket reconnect
-_MOMENTUM_WINDOW = 30.0    # seconds of trade history for momentum calculation
+_MOMENTUM_WINDOW = 10.0    # seconds of trade history for momentum calculation
+                           # Reduced from 30s: at 30s the signal fires too late — contracts
+                           # already at $0.85+ because automated MMs reprice within 1–5s of a move.
+_CVD_WINDOW = 10.0         # seconds of aggTrade history for CVD (taker volume delta)
+                           # Research: trade-based OFI predicts 5–30s ahead; 10s matches momentum window.
 _LOG_EVERY_N_TRADES = 100  # log a DEBUG price line once per N trades
 
 
@@ -53,6 +62,12 @@ class ExchangeFeed:
     def __init__(self):
         self._prices: dict[str, float] = {}
         self._trade_history: dict[str, deque] = {
+            sym: deque() for sym in _BINANCE_STREAMS
+        }
+        # CVD buffer: stores (timestamp, signed_qty) per symbol.
+        # signed_qty > 0 = buy taker (buyer hit ask); signed_qty < 0 = sell taker (seller hit bid).
+        # Binance aggTrade: m=True means buyer is maker → taker was seller → signed = -qty.
+        self._cvd_buffer: dict[str, deque] = {
             sym: deque() for sym in _BINANCE_STREAMS
         }
         self._running = False
@@ -99,6 +114,36 @@ class ExchangeFeed:
         if "/" not in symbol:
             symbol = f"{symbol}/USDT"
         return self._ob_imbalance.get(symbol, None)
+
+    def get_cvd(self, symbol: str, window_secs: float = _CVD_WINDOW) -> float | None:
+        """
+        Cumulative Volume Delta (taker OFI) over the last window_secs seconds.
+
+        Returns (buy_taker_qty - sell_taker_qty) / total_qty in [-1.0, +1.0].
+        Positive = buy pressure (buyers hitting asks).
+        Negative = sell pressure (sellers hitting bids).
+        Returns None until enough trade data is buffered.
+
+        Research: trade-based OFI is more predictive than resting OBI for altcoins
+        because executed volume captures realized directional pressure, while resting
+        order books contain spoofed/fleeting orders (arXiv 2507.22712).
+        """
+        if "/" not in symbol:
+            symbol = f"{symbol}/USDT"
+        buf = self._cvd_buffer.get(symbol)
+        if not buf:
+            return None
+        cutoff = time.time() - window_secs
+        total_abs = 0.0
+        net = 0.0
+        for ts, sq in buf:
+            if ts < cutoff:
+                continue
+            total_abs += abs(sq)
+            net += sq
+        if total_abs == 0:
+            return None
+        return net / total_abs
 
     async def run(self) -> None:
         """Start the feed. Blocks until stop() is called."""
@@ -279,10 +324,14 @@ class ExchangeFeed:
             logger.debug(f"Order book message parse error for {symbol}: {exc}")
 
     def _handle_trade_message(self, symbol: str, raw: str) -> None:
-        """Parse an aggTrade message and update price + history."""
+        """Parse an aggTrade message and update price, momentum history, and CVD buffer."""
         try:
             data = json.loads(raw)
             price = float(data["p"])
+            qty   = float(data["q"])
+            # m=True → buyer is maker → taker was the SELLER → sell pressure → negative
+            # m=False → buyer is taker → buy pressure → positive
+            signed_qty = -qty if data.get("m", False) else qty
         except (KeyError, ValueError, json.JSONDecodeError) as exc:
             logger.debug(f"Binance message parse error for {symbol}: {exc}")
             return
@@ -290,13 +339,19 @@ class ExchangeFeed:
         now = time.time()
         self._prices[symbol] = price
 
+        # Momentum history
         history = self._trade_history[symbol]
         history.append((now, price))
-
-        # Purge entries older than the momentum window
-        cutoff = now - self._window_seconds
-        while history and history[0][0] < cutoff:
+        cutoff_mom = now - self._window_seconds
+        while history and history[0][0] < cutoff_mom:
             history.popleft()
+
+        # CVD buffer (trade-based OFI)
+        cvd_buf = self._cvd_buffer[symbol]
+        cvd_buf.append((now, signed_qty))
+        cutoff_cvd = now - _CVD_WINDOW
+        while cvd_buf and cvd_buf[0][0] < cutoff_cvd:
+            cvd_buf.popleft()
 
         # Periodic debug log — every N trades
         self._trade_counts[symbol] = self._trade_counts.get(symbol, 0) + 1

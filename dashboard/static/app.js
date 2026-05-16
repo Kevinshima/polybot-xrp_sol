@@ -2,15 +2,13 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
-let sentimentProfileActive = false;
-let sentimentPollingStarted = false;
 let activeProfile = null;
 
 // ── Analytics charts ──────────────────────────────────────────────────────────
 let equityChart = null;
 let dailyChart = null;
 let assetChart = null;
-let timeframeChart = null;
+let entrypathChart = null;
 let analyticsData = null;  // full dataset cached from /api/analytics
 let activeRange = "all";
 let equityCurvePoints = [];  // current filtered curve, for tooltip access
@@ -160,8 +158,8 @@ function initAnalyticsCharts() {
     },
   });
 
-  // ── By Timeframe bar chart ────────────────────────────────────────────────
-  timeframeChart = new Chart($("timeframe-chart").getContext("2d"), {
+  // ── By Entry Path bar chart ───────────────────────────────────────────────
+  entrypathChart = new Chart($("entrypath-chart").getContext("2d"), {
     type: "bar",
     data: { labels: [], datasets: [{
       label: "Net PnL",
@@ -234,27 +232,27 @@ function applyAnalyticsRange(data, range) {
     ? data.daily_bars
     : data.daily_bars.filter(d => d.date >= new Date(cutoff * 1000).toISOString().slice(0, 10));
 
-  // Recompute by_asset and by_timeframe from filtered curve
+  // Recompute by_asset and by_entry_path from filtered curve
   const assetMap = {};
-  const tfMap = {};
+  const pathMap = {};
   equityCurvePoints.forEach(p => {
     const a = p.asset || "BTC";
-    const tf = p.timeframe || "?";
-    if (!assetMap[a]) assetMap[a] = { asset: a, wins: 0, losses: 0, pnl: 0, trades: 0 };
-    if (!tfMap[tf])   tfMap[tf]   = { timeframe: tf, wins: 0, losses: 0, pnl: 0, trades: 0 };
-    assetMap[a].trades++;  tfMap[tf].trades++;
-    assetMap[a].pnl = Math.round((assetMap[a].pnl + p.pnl) * 10000) / 10000;
-    tfMap[tf].pnl   = Math.round((tfMap[tf].pnl   + p.pnl) * 10000) / 10000;
-    if (p.pnl > 0) { assetMap[a].wins++;  tfMap[tf].wins++;  }
-    else           { assetMap[a].losses++; tfMap[tf].losses++; }
+    const ep = p.entry_path || "UNKNOWN";
+    if (!assetMap[a])  assetMap[a]  = { asset: a, wins: 0, losses: 0, pnl: 0, trades: 0 };
+    if (!pathMap[ep])  pathMap[ep]  = { entry_path: ep, wins: 0, losses: 0, pnl: 0, trades: 0 };
+    assetMap[a].trades++;   pathMap[ep].trades++;
+    assetMap[a].pnl  = Math.round((assetMap[a].pnl  + p.pnl) * 10000) / 10000;
+    pathMap[ep].pnl  = Math.round((pathMap[ep].pnl  + p.pnl) * 10000) / 10000;
+    if (p.pnl > 0) { assetMap[a].wins++;  pathMap[ep].wins++;  }
+    else           { assetMap[a].losses++; pathMap[ep].losses++; }
   });
   const byAsset = Object.values(assetMap).sort((a, b) => a.asset.localeCompare(b.asset));
-  const byTf    = Object.values(tfMap).sort((a, b) => a.timeframe.localeCompare(b.timeframe));
+  const byPath  = Object.values(pathMap).sort((a, b) => a.entry_path.localeCompare(b.entry_path));
 
   _updateEquityChart(equityCurvePoints);
   _updateDailyChart(daily);
   _updateBreakdownChart(assetChart, byAsset, "asset");
-  _updateBreakdownChart(timeframeChart, byTf, "timeframe");
+  _updateBreakdownChart(entrypathChart, byPath, "entry_path");
 }
 
 function _updateEquityChart(curve) {
@@ -304,7 +302,6 @@ function stratBadge(name) {
     market_maker: "purple",
     ai_sentiment: "yellow",
     copy_trader: "green",
-    synth_arb: "teal",
   };
   return colors[name] || "blue";
 }
@@ -329,8 +326,10 @@ function updateMetrics(data) {
 
   const halted = risk.halted === true;
   $("halted-banner").classList.toggle("visible", halted);
-  $("daily-loss").textContent =
-    fmt(-(risk.daily_pnl || 0)) + " / " + fmt(risk.daily_loss_cap || 500) + " USDC";
+  const lossUsed = Math.max(0, -(risk.daily_pnl || 0));
+  const cap = risk.daily_loss_cap || 300;
+  $("daily-loss").textContent = lossUsed.toFixed(2) + " / " + cap.toFixed(2) + " USDC";
+  $("daily-loss").className = "value " + (lossUsed > cap * 0.75 ? "neg" : lossUsed > 0 ? "neutral" : "pos");
 }
 
 
@@ -456,11 +455,7 @@ function connectWS() {
 // ── Strategy status pills ─────────────────────────────────────────────────────
 function renderStrategyPills() {
   const strategies = [
-    { name: "latency_arb", label: "Latency Arb" },
-    { name: "market_maker", label: "Market Maker" },
-    { name: "ai_sentiment", label: "AI Sentiment" },
-    { name: "copy_trader", label: "Copy Trader" },
-    { name: "synth_arb", label: "Synth Arb" },
+    { name: "latency_arb", label: "Latency Arb (SOL/XRP)" },
   ];
 
   const container = $("strategy-status");
@@ -472,192 +467,70 @@ function renderStrategyPills() {
   `).join("");
 }
 
-function applyProfileLayout(profile) {
-  if (activeProfile === profile) return;
-  activeProfile = profile;
-
-  document.body.classList.toggle("profile-sentiment", profile === "sentiment");
-
-  const sentimentSection = $("sentiment-section");
-  const target = $(profile === "sentiment" ? "orders-section" : "sentiment-default-anchor");
-  if (sentimentSection && target) {
-    target.insertAdjacentElement("afterend", sentimentSection);
-  }
-}
-
-function startSentimentPolling() {
-  if (sentimentPollingStarted) return;
-  sentimentPollingStarted = true;
-  fetchSentimentNews();
-  fetchSentimentDecisions();
-  fetchSentimentMetrics();
-  setInterval(fetchSentimentNews, 30000);
-  setInterval(fetchSentimentDecisions, 30000);
-  setInterval(fetchSentimentMetrics, 30000);
-}
-
 // ── Polling fallbacks ─────────────────────────────────────────────────────────
 async function pollAll() {
   await Promise.allSettled([fetchPnL(), fetchAnalytics(), fetchOrders(), fetchLogs()]);
 }
 
-// ── Sentiment panel ───────────────────────────────────────────────────────────
-async function fetchSentimentStatus() {
+// ── Latency Arb stats (filter counters + ML shadow + regime) ─────────────────
+async function fetchLatencyArbStats() {
   try {
-    const r = await fetch("/api/sentiment/status");
-    const d = await r.json();
-    const profile = d.profile || "latency";
-    const sentimentSection = document.getElementById("sentiment-section");
-    applyProfileLayout(profile);
-    sentimentProfileActive = profile === "sentiment";
-    sentimentSection.style.display = sentimentProfileActive ? "" : "none";
-    document.getElementById("sent-profile").textContent = d.profile || "—";
-    document.getElementById("sent-analyzer").textContent = d.analyzer || "—";
-    const antEl = document.getElementById("sent-anthropic");
-    antEl.textContent = d.anthropic_key_set ? "✓ set" : "✗ missing";
-    antEl.className = "value " + (d.anthropic_key_set ? "positive" : "negative");
-    const newsEl = document.getElementById("sent-newsapi");
-    newsEl.textContent = d.newsapi_key_set ? "✓ set" : "✗ missing";
-    newsEl.className = "value " + (d.newsapi_key_set ? "positive" : "negative");
-    if (d.strategy_daily_pnl != null) {
-      document.getElementById("sent-analyzer").title =
-        `Daily PnL ${fmt(d.strategy_daily_pnl)} / Cap ${fmt(d.strategy_loss_cap || 0)}`;
-    }
-    if (sentimentProfileActive) {
-      startSentimentPolling();
-    }
-  } catch (_) {}
-}
-
-async function fetchSentimentNews() {
-  if (!sentimentProfileActive) return;
-  try {
-    const r = await fetch("/api/sentiment/news");
-    const rows = await r.json();
-    const tbody = document.getElementById("sent-news-tbody");
-    if (!rows.length) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted);text-align:center">No news yet</td></tr>'; return; }
-    tbody.innerHTML = rows.map(n => `
-      <tr>
-        <td style="white-space:nowrap">${n.published_at ? n.published_at.slice(0, 16).replace("T"," ") : "—"}</td>
-        <td>${n.source || "—"}</td>
-        <td>${(n.title || "").slice(0, 60)}</td>
-        <td style="color:var(--accent)">${n.raw_themes || "—"}</td>
-      </tr>`).join("");
-  } catch (_) {}
-}
-
-async function fetchSentimentDecisions() {
-  if (!sentimentProfileActive) return;
-  try {
-    const r = await fetch("/api/sentiment/decisions");
-    const rows = await r.json();
-    const tbody = document.getElementById("sent-decisions-tbody");
-    if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center">No decisions yet</td></tr>'; return; }
-    tbody.innerHTML = rows.map(d => {
-      const badge = d.decision === "skip"
-        ? `<span class="badge badge-neutral">skip</span>`
-        : `<span class="badge badge-positive">${d.decision}</span>`;
-      return `<tr>
-        <td>${(d.market_question || "").slice(0, 50)}</td>
-        <td>${d.market_price != null ? d.market_price.toFixed(3) : "—"}</td>
-        <td>${d.estimated_probability != null ? d.estimated_probability.toFixed(3) : "—"}</td>
-        <td>${d.edge != null ? d.edge.toFixed(3) : "—"}</td>
-        <td>${badge}</td>
-        <td style="color:var(--muted)">${d.skip_reason || ""}</td>
-      </tr>`;
-    }).join("");
-  } catch (_) {}
-}
-
-async function fetchSentimentMetrics() {
-  if (!sentimentProfileActive) return;
-  try {
-    const r = await fetch("/api/sentiment/metrics");
-    const data = await r.json();
-    const funnel = data.funnel || {};
-    document.getElementById("sent-seen").textContent = funnel.headlines_seen ?? "—";
-    document.getElementById("sent-relevant").textContent = funnel.relevant_headlines ?? "—";
-    document.getElementById("sent-mapped").textContent = funnel.mapped_headlines ?? "—";
-    document.getElementById("sent-traded").textContent = funnel.traded_markets ?? "—";
-
-    const horizonsBody = document.getElementById("sent-horizons-tbody");
-    const horizons = data.horizons || {};
-    const horizonRows = ["15m", "1h", "4h", "24h"].map(key => {
-      const row = horizons[key] || {};
-      return `<tr>
-        <td>${key}</td>
-        <td>${row.eligible_trades ?? 0}</td>
-        <td class="${colorClass(row.total_pnl || 0)}">${fmt(row.total_pnl || 0)}</td>
-        <td class="${colorClass(row.avg_pnl || 0)}">${fmt(row.avg_pnl || 0)}</td>
-        <td>${(((row.win_rate || 0) * 100)).toFixed(1)}%</td>
-      </tr>`;
-    }).join("");
-    horizonsBody.innerHTML = horizonRows || '<tr><td colspan="5" style="color:var(--muted);text-align:center">No trades yet</td></tr>';
-
-    const renderBreakdown = (rows, tbodyId, keyName) => {
-      const tbody = document.getElementById(tbodyId);
-      if (!rows || !rows.length) {
-        tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center">No data yet</td></tr>';
-        return;
-      }
-      tbody.innerHTML = rows.map(row => `<tr>
-        <td>${row[keyName] || "—"}</td>
-        <td>${row.trades || 0}</td>
-        <td class="${colorClass(row.total_pnl || 0)}">${fmt(row.total_pnl || 0)}</td>
-        <td class="${colorClass(row.avg_pnl || 0)}">${fmt(row.avg_pnl || 0)}</td>
-        <td>${(((row.win_rate || 0) * 100)).toFixed(1)}%</td>
-      </tr>`).join("");
-    };
-
-    renderBreakdown(data.by_source, "sent-source-tbody", "source");
-    renderBreakdown(data.by_theme, "sent-theme-tbody", "theme");
-  } catch (_) {}
-}
-
-// ── Synth Arb panel ───────────────────────────────────────────────────────────
-async function fetchSynthStats() {
-  try {
-    const r = await fetch("/api/synth_arb/stats");
+    const r = await fetch("/api/latency_arb/stats");
     const d = await r.json();
 
-    const section = $("synth-section");
-    if (!d.enabled) { section.style.display = "none"; return; }
-    section.style.display = "";
+    // Regime + no-trade streak
+    const regime = $("regime-label");
+    if (regime) {
+      regime.textContent = d.regime || "—";
+      regime.className = "value " + (
+        d.regime && d.regime.includes("Overnight") ? "neg" :
+        d.regime && d.regime.includes("Afternoon") ? "pos" : "neutral"
+      );
+    }
+    const noTradeEl = $("no-trade-hours");
+    if (noTradeEl) {
+      const h = d.hours_since_last_trade;
+      noTradeEl.textContent = h != null ? h + "h" : "—";
+      noTradeEl.className = "value " + (h != null && h > 12 ? "neg" : h != null && h < 4 ? "pos" : "neutral");
+    }
 
-    const setVal = (id, text, cls) => {
+    // Filter rejection counters
+    const rej = d.filter_rejections || {};
+    const setCard = (id, val) => { const el = $(id); if (el) el.textContent = val ?? 0; };
+    setCard("flt-total", d.total_rejected);
+    setCard("flt-ca", rej.ca_not_aligned || 0);
+    setCard("flt-danger", rej.ft_danger_zone || 0);
+    setCard("flt-circuit", rej.circuit_breaker || 0);
+    setCard("flt-delta", rej.delta_not_aligned || 0);
+    setCard("flt-ob", rej.weak_ob || 0);
+    setCard("flt-overnight", (rej.stale_flat_overnight || 0) + (rej.overnight || 0));
+    setCard("flt-stale", rej.cooldown_active || 0);
+
+    // ML shadow panel
+    const ml = d.ml || {};
+    const setMl = (id, val, cls) => {
       const el = $(id); if (!el) return;
-      el.textContent = text;
+      el.textContent = val ?? "—";
       if (cls) el.className = "value " + cls;
     };
 
-    setVal("synth-daily-pnl",
-      (d.daily_pnl >= 0 ? "+" : "") + d.daily_pnl.toFixed(2) + " USDC",
-      d.daily_pnl >= 0 ? "pos" : "neg");
-    setVal("synth-cumulative-pnl",
-      (d.cumulative_pnl >= 0 ? "+" : "") + d.cumulative_pnl.toFixed(2) + " USDC",
-      d.cumulative_pnl >= 0 ? "pos" : "neg");
-    setVal("synth-open-count", d.open_count, "neutral");
-    setVal("synth-total-trades", d.total_trades, "neutral");
-    setVal("synth-win-rate", ((d.win_rate || 0) * 100).toFixed(1) + "%", "neutral");
-    setVal("synth-avg-gap", d.avg_gap_pct > 0 ? d.avg_gap_pct.toFixed(2) + "%" : "—", "neutral");
+    const auc = parseFloat(ml.cv_roc_auc) || 0;
+    setMl("ml-auc", auc ? auc.toFixed(3) : "—", auc >= 0.60 ? "pos" : auc >= 0.55 ? "neutral" : "neg");
 
-    const table = $("synth-positions-table");
-    const tbody = $("synth-positions-tbody");
-    if (!d.positions || !d.positions.length) {
-      table.style.display = "none";
-      return;
-    }
-    table.style.display = "";
-    tbody.innerHTML = d.positions.map(p => `<tr>
-      <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${p.question}">${p.question || p.condition_id}</td>
-      <td>${p.yes_price.toFixed(3)}</td>
-      <td>${p.no_price.toFixed(3)}</td>
-      <td>$${p.total_cost.toFixed(2)}</td>
-      <td>$${p.payout_target.toFixed(0)}</td>
-      <td style="color:var(--teal)">${p.gap_pct.toFixed(2)}%</td>
-      <td>${p.age_minutes.toFixed(0)}m</td>
-    </tr>`).join("");
-  } catch (e) { console.warn("fetchSynthStats:", e); }
+    const aftAuc = parseFloat(ml.afternoon_auc) || 0;
+    setMl("ml-afternoon-auc", aftAuc ? aftAuc.toFixed(3) : "—", aftAuc >= 0.58 ? "pos" : aftAuc >= 0.52 ? "neutral" : "neg");
+
+    setMl("ml-n-trades", ml.n_trades ?? "—", "neutral");
+    const wr = parseFloat(ml.win_rate) || 0;
+    setMl("ml-wr", wr ? (wr * 100).toFixed(1) + "%" : "—", wr >= 0.55 ? "pos" : "neutral");
+
+    const gateEnabled = ml.gate_enabled === true;
+    setMl("ml-gate", gateEnabled ? "ACTIVE" : "Shadow", gateEnabled ? "pos" : "neutral");
+
+    const trainedAt = ml.trained_at ? ml.trained_at.toString().slice(0, 16).replace("T", " ") : "—";
+    setMl("ml-trained-at", trainedAt, "neutral");
+
+  } catch (e) { console.warn("fetchLatencyArbStats:", e); }
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -665,17 +538,13 @@ initAnalyticsCharts();
 renderStrategyPills();
 connectWS();
 pollAll();
-fetchSentimentStatus();
-fetchSynthStats();
+fetchLatencyArbStats();
 
 // Slower polls for orders/logs (WS handles positions + metrics)
 setInterval(fetchOrders, 10000);
 setInterval(fetchLogs, 15000);
 setInterval(fetchPnL, 30000);
-setInterval(fetchAnalytics, 60000);  // refresh analytics every minute
+setInterval(fetchAnalytics, 60000);
 
-// Sentiment profile detection / panel polls
-setInterval(fetchSentimentStatus, 60000);
-
-// Synth arb panel
-setInterval(fetchSynthStats, 30000);
+// Latency arb stats (filter counters, ML shadow, regime)
+setInterval(fetchLatencyArbStats, 60000);

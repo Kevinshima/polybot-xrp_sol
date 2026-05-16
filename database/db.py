@@ -70,11 +70,20 @@ with engine.connect() as _conn:
     for _col, _type in [
         ("momentum_at_entry", "REAL"),
         ("ob_imbalance_at_entry", "REAL"),
+        ("cvd_at_entry", "REAL"),
         ("trend_slope_at_entry", "REAL"),
         ("trend_direction_at_entry", "TEXT"),
         ("consec_losses_at_entry", "INTEGER"),
         ("timeframe", "TEXT"),
         ("ml_win_prob", "REAL"),
+        ("momentum_delta", "REAL"),
+        ("secs_since_trend_change", "REAL"),
+        ("prev_trend_direction", "TEXT"),
+        ("entry_path", "TEXT"),
+        ("consec_wins", "INTEGER"),
+        ("ob_at_queue_time", "REAL"),
+        ("cross_asset_agree", "INTEGER"),
+        ("asset_range_15m", "REAL"),
     ]:
         try:
             _conn.execute(_text(f"ALTER TABLE trades ADD COLUMN {_col} {_type}"))
@@ -102,14 +111,23 @@ def insert_trade(
     status: str = "open",
     exit_reason: str = "",
     dry_run: bool = False,
-    asset: str = "BTC",
+    asset: str = "SOL",
     momentum_at_entry: Optional[float] = None,
     ob_imbalance_at_entry: Optional[float] = None,
+    cvd_at_entry: Optional[float] = None,
     trend_slope_at_entry: Optional[float] = None,
     trend_direction_at_entry: Optional[str] = None,
     consec_losses_at_entry: Optional[int] = None,
     timeframe: Optional[str] = None,
     ml_win_prob: Optional[float] = None,
+    momentum_delta: Optional[float] = None,
+    secs_since_trend_change: Optional[float] = None,
+    prev_trend_direction: Optional[str] = None,
+    entry_path: Optional[str] = None,
+    consec_wins: Optional[int] = None,
+    ob_at_queue_time: Optional[float] = None,
+    cross_asset_agree: Optional[int] = None,
+    asset_range_15m: Optional[float] = None,
 ) -> None:
     with get_session() as s:
         trade = Trade(
@@ -129,11 +147,20 @@ def insert_trade(
             timestamp=int(time.time()),
             momentum_at_entry=momentum_at_entry,
             ob_imbalance_at_entry=ob_imbalance_at_entry,
+            cvd_at_entry=cvd_at_entry,
             trend_slope_at_entry=trend_slope_at_entry,
             trend_direction_at_entry=trend_direction_at_entry,
             consec_losses_at_entry=consec_losses_at_entry,
             timeframe=timeframe,
             ml_win_prob=ml_win_prob,
+            momentum_delta=momentum_delta,
+            secs_since_trend_change=secs_since_trend_change,
+            prev_trend_direction=prev_trend_direction,
+            entry_path=entry_path,
+            consec_wins=consec_wins,
+            ob_at_queue_time=ob_at_queue_time,
+            cross_asset_agree=cross_asset_agree,
+            asset_range_15m=asset_range_15m,
         )
         s.merge(trade)
         s.commit()
@@ -295,15 +322,24 @@ def _trade_to_dict(t: Trade) -> dict:
         "status": t.status,
         "exit_reason": t.exit_reason,
         "dry_run": bool(t.dry_run),
-        "asset": t.asset or "BTC",
+        "asset": t.asset or "SOL",
         "timestamp": t.timestamp,
         "momentum_at_entry": t.momentum_at_entry,
         "ob_imbalance_at_entry": t.ob_imbalance_at_entry,
+        "cvd_at_entry": t.cvd_at_entry,
         "trend_slope_at_entry": t.trend_slope_at_entry,
         "trend_direction_at_entry": t.trend_direction_at_entry,
         "consec_losses_at_entry": t.consec_losses_at_entry,
         "timeframe": t.timeframe,
         "ml_win_prob": t.ml_win_prob,
+        "momentum_delta": t.momentum_delta,
+        "secs_since_trend_change": t.secs_since_trend_change,
+        "prev_trend_direction": t.prev_trend_direction,
+        "entry_path": t.entry_path,
+        "consec_wins": t.consec_wins,
+        "ob_at_queue_time": t.ob_at_queue_time,
+        "cross_asset_agree": t.cross_asset_agree,
+        "asset_range_15m": t.asset_range_15m,
     }
 
 
@@ -664,7 +700,7 @@ def _backfill_sentiment_trade_outcomes() -> None:
 _backfill_sentiment_trade_outcomes()
 
 
-def set_market_cooldown(market_id: str, timestamp: float, strategy: str = "ai_sentiment") -> None:
+def set_market_cooldown(market_id: str, timestamp: float, strategy: str = "latency_arb") -> None:
     """Persist a market cooldown so it survives restarts."""
     with get_session() as s:
         row = s.get(MarketCooldown, market_id)
@@ -676,7 +712,7 @@ def set_market_cooldown(market_id: str, timestamp: float, strategy: str = "ai_se
         s.commit()
 
 
-def get_market_cooldowns(strategy: str = "ai_sentiment") -> dict[str, float]:
+def get_market_cooldowns(strategy: str = "latency_arb") -> dict[str, float]:
     """Load all persisted market cooldowns for a strategy."""
     with get_session() as s:
         rows = s.query(MarketCooldown).filter(MarketCooldown.strategy == strategy).all()

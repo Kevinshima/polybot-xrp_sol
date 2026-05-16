@@ -28,8 +28,8 @@ ENV PYTHONPATH=/app
 ENV PATH=/home/botuser/.local/bin:$PATH
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -f http://localhost:${DASHBOARD_PORT:-8080}/api/pnl || exit 1
+  CMD curl -f http://localhost:${DASHBOARD_PORT:-8083}/api/pnl || exit 1
 
-EXPOSE 8080
+EXPOSE 8083
 
 CMD ["python", "-m", "bot.engine"]

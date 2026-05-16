@@ -34,17 +34,13 @@ WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 # ── Exchange APIs ─────────────────────────────────────────────────────────────
 BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET: str = os.getenv("BINANCE_API_SECRET", "")
-COINBASE_API_KEY: str = os.getenv("COINBASE_API_KEY", "")
-COINBASE_API_SECRET: str = os.getenv("COINBASE_API_SECRET", "")
 
 # ── AI / News ─────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
-GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-TWITTER_BEARER_TOKEN: str = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
-DASHBOARD_PORT: int = _int("DASHBOARD_PORT", 8080)
+DASHBOARD_PORT: int = _int("DASHBOARD_PORT", 8083)
 DASHBOARD_HOST: str = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 
 # ── Redis ─────────────────────────────────────────────────────────────────────
@@ -55,19 +51,8 @@ DAILY_LOSS_CAP_USDC: float = _float("DAILY_LOSS_CAP_USDC", 500.0)
 MAX_POSITION_SIZE_USDC: float = _float("MAX_POSITION_SIZE_USDC", 2000.0)
 MAX_OPEN_ORDERS: int = _int("MAX_OPEN_ORDERS", 20)
 
-# ── Strategy Toggles ──────────────────────────────────────────────────────────
+# ── Strategy Toggle ───────────────────────────────────────────────────────────
 LATENCY_ARB_ENABLED: bool = _bool("LATENCY_ARB_ENABLED", True)
-MARKET_MAKER_ENABLED: bool = _bool("MARKET_MAKER_ENABLED", True)
-AI_SENTIMENT_ENABLED: bool = _bool("AI_SENTIMENT_ENABLED", True)
-COPY_TRADER_ENABLED: bool = _bool("COPY_TRADER_ENABLED", True)
-
-# ── Copy Trader ───────────────────────────────────────────────────────────────
-TARGET_WALLETS: list[str] = [
-    w.strip()
-    for w in os.getenv("TARGET_WALLETS", "").split(",")
-    if w.strip()
-]
-COPY_RATIO: float = _float("COPY_RATIO", 0.10)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
@@ -76,79 +61,14 @@ LOG_FILE: str = os.getenv("LOG_FILE", "logs/bot.log")
 # ── Dry Run ───────────────────────────────────────────────────────────────────
 DRY_RUN: bool = _bool("DRY_RUN", False)
 
+# ── Trading Fees ──────────────────────────────────────────────────────────────
+# Polymarket CLOB taker fee for FOK market orders (~2%).
+TAKER_FEE_RATE: float = _float("TAKER_FEE_RATE", 0.020)
+
 # ── Blockchain ────────────────────────────────────────────────────────────────
 POLYGON_RPC_URL: str = os.getenv("POLYGON_RPC_URL", "https://polygon-bor-rpc.publicnode.com")
 CHAIN_ID: int = 137
-
-# Contract addresses on Polygon
 USDC_ADDRESS: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-CTF_ADDRESS: str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-CLOB_EXCHANGE_ADDRESS: str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-
-# ── Market Maker ──────────────────────────────────────────────────────────────
-MM_DEFAULT_SIZE_USDC: float = _float("MM_DEFAULT_SIZE_USDC", 200.0)
-MM_MIN_SPREAD: float = _float("MM_MIN_SPREAD", 0.03)
-MM_MAX_SPREAD: float = _float("MM_MAX_SPREAD", 0.06)
-MM_REQUOTE_INTERVAL: int = _int("MM_REQUOTE_INTERVAL", 60)
-
-# ── ETH Market ───────────────────────────────────────────────────────────────
-ETH_LAB_ENABLED: bool = _bool("ETH_LAB_ENABLED", True)  # add ETH updown markets alongside BTC
-
-# ETH-specific filters (ETH is more volatile than BTC — apply stricter gates)
-ETH_5M_MID_PRICE_MIN: float = _float("ETH_5M_MID_PRICE_MIN", 0.45)   # tighter than BTC's 0.40
-ETH_5M_MID_PRICE_MAX: float = _float("ETH_5M_MID_PRICE_MAX", 0.55)   # tighter than BTC's 0.58
-ETH_15M_MID_PRICE_MIN: float = _float("ETH_15M_MID_PRICE_MIN", 0.47) # tighter than global 0.45
-ETH_15M_MID_PRICE_MAX: float = _float("ETH_15M_MID_PRICE_MAX", 0.57) # tighter than global 0.62
-ETH_OB_MIN_IMBALANCE: float = _float("ETH_OB_MIN_IMBALANCE", 0.75)   # stricter absolute OB floor for ETH
-ETH_CONSEC_LOSS_PAUSE: int = _int("ETH_CONSEC_LOSS_PAUSE", 2)         # pause after N consecutive losses (same as BTC default)
-LAB_CONSEC_LOSS_PAUSE: int = _int("LAB_CONSEC_LOSS_PAUSE", 3)         # pause after N consecutive BTC losses
-ETH_LOSS_COOLDOWN_SECS: int = _int("ETH_LOSS_COOLDOWN_SECS", 600)     # cooldown duration after ETH loss streak
-ETH_OB_SIZE_STRONG: float = _float("ETH_OB_SIZE_STRONG", 1.00)        # ETH STRONG OB size multiplier (flat — ETH is more volatile)
-
-# ── Latency Arb ───────────────────────────────────────────────────────────────
-LAB_BASE_SIZE_USDC: float = _float("LAB_BASE_SIZE_USDC", 50.0)  # base bet before multipliers
-LAB_MOMENTUM_THRESHOLD: float = _float("LAB_MOMENTUM_THRESHOLD", 0.0010)  # 0.10% — actual trading threshold
-BTC_5M_MOMENTUM_MULT: float = _float("BTC_5M_MOMENTUM_MULT", 1.3)  # extra strictness for BTC 5m vs ETH 5m
-LAB_POLL_INTERVAL: float = _float("LAB_POLL_INTERVAL", 0.5)  # 500ms
-LAB_MAX_CONCURRENT_POSITIONS: int = _int("LAB_MAX_CONCURRENT_POSITIONS", 3)
-LAB_MAX_CONCURRENT_POSITIONS_5M: int = _int("LAB_MAX_CONCURRENT_POSITIONS_5M", LAB_MAX_CONCURRENT_POSITIONS)
-LAB_MAX_CONCURRENT_POSITIONS_15M: int = _int("LAB_MAX_CONCURRENT_POSITIONS_15M", LAB_MAX_CONCURRENT_POSITIONS)
-LAB_WINDOWS: list[int] = [int(w) for w in os.getenv("LAB_WINDOWS", "5,15").split(",")]
-LAB_15M_CONFIRM_SECONDS: int = _int("LAB_15M_CONFIRM_SECONDS", 10)        # 10s: enter before crowd reprices
-LAB_15M_CONFIRM_RETENTION: float = _float("LAB_15M_CONFIRM_RETENTION", 0.6)  # confirm at 60% of threshold
-LAB_15M_FASTTRACK_MULTIPLIER: float = _float("LAB_15M_FASTTRACK_MULTIPLIER", 2.0)  # instant entry if momentum >= threshold * 2.0
-LAB_15M_CONFIRMATION_MARGIN: float = _float("LAB_15M_CONFIRMATION_MARGIN", 0.10)
-LAB_OB_IMBALANCE_ENABLED: bool = _bool("LAB_OB_IMBALANCE_ENABLED", True)
-LAB_OB_IMBALANCE_THRESHOLD: float = _float("LAB_OB_IMBALANCE_THRESHOLD", 0.10)
-LAB_OB_SIZING_ENABLED: bool = _bool("LAB_OB_SIZING_ENABLED", True)
-LAB_OB_SIZE_WEAK: float = _float("LAB_OB_SIZE_WEAK", 0.50)       # 50% of size when OB is weak
-LAB_OB_SIZE_STRONG: float = _float("LAB_OB_SIZE_STRONG", 1.50)   # 150% of size when OB is strong
-LAB_OB_STRONG_THRESHOLD: float = _float("LAB_OB_STRONG_THRESHOLD", 0.60)  # imbalance >= this = strong
-OB_MIN_IMBALANCE: float = _float("OB_MIN_IMBALANCE", 0.20)       # absolute floor — skip any trade if |imbalance| < this
-EVENING_OB_MIN_IMBALANCE: float = _float("EVENING_OB_MIN_IMBALANCE", 0.30)  # stricter floor after EVENING_HOURS_START
-EVENING_HOURS_START: int = _int("EVENING_HOURS_START", 18)       # local hour (24h) at which evening floor activates
-TREND_FILTER_ENABLED: bool = _bool("TREND_FILTER_ENABLED", True)
-TREND_FILTER_TICKS: int = _int("TREND_FILTER_TICKS", 20)
-TREND_FILTER_MIN_SLOPE: float = _float("TREND_FILTER_SLOPE", 0.003)
-LAB_15M_MID_PRICE_MIN: float = _float("LAB_15M_MID_PRICE_MIN", 0.45)  # 15m entry: discard if mid < this (below 0.45 = 43% win rate, below break-even)
-LAB_15M_MID_PRICE_MAX: float = _float("LAB_15M_MID_PRICE_MAX", 0.62)  # 15m entry: discard if mid > this
-LAB_5M_MID_PRICE_MIN: float = _float("LAB_5M_MID_PRICE_MIN", 0.40)   # 5m entry: discard if mid < this
-LAB_5M_MID_PRICE_MAX: float = _float("LAB_5M_MID_PRICE_MAX", 0.58)   # 5m entry: discard if mid > this
-LAB_PRICE_MULT: float = _float("LAB_PRICE_MULT", 0.5)            # flat position size multiplier (do not vary by mid-price)
-
-# ── Latency Arb Active Exit ───────────────────────────────────────────────────
-LAB_EXIT_ENABLED: bool = _bool("LAB_EXIT_ENABLED", True)          # enable stop-loss / take-profit for latency arb
-LAB_STOP_LOSS_PCT: float = _float("LAB_STOP_LOSS_PCT", 0.35)      # exit if price falls 35% from entry
-LAB_TAKE_PROFIT_PCT: float = _float("LAB_TAKE_PROFIT_PCT", 0.50)  # exit if price rises 50% from entry
-
-# ── AI Sentiment ─────────────────────────────────────────────────────────────
-AI_MAX_CONCURRENT_POSITIONS: int = _int("AI_MAX_CONCURRENT_POSITIONS", 5)
-AI_EDGE_THRESHOLD: float = _float("AI_EDGE_THRESHOLD", 0.07)  # 7%
-AI_POLL_INTERVAL: int = _int("AI_POLL_INTERVAL", 60)
-
-# ── Copy Trader ───────────────────────────────────────────────────────────────
-CT_POLL_INTERVAL: int = _int("CT_POLL_INTERVAL", 10)
-CT_MIN_SECONDS_TO_CLOSE: int = _int("CT_MIN_SECONDS_TO_CLOSE", 300)  # 5 min
 
 # ── Profile / Runtime ─────────────────────────────────────────────────────────
 ACTIVE_PROFILE: str = os.getenv("ACTIVE_PROFILE", "latency")
@@ -158,40 +78,108 @@ DB_PATH: str = os.getenv("DB_PATH", "data/polymarket.db")
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# ── Synthetic Arbitrage ───────────────────────────────────────────────────────
-SYNTH_ARB_ENABLED: bool = _bool("SYNTH_ARB_ENABLED", False)
-SYNTH_MIN_GAP: float = _float("SYNTH_MIN_GAP", 0.030)          # minimum net gap after fees (3%)
-SYNTH_POSITION_SIZE: float = _float("SYNTH_POSITION_SIZE", 50.0) # target payout P per opportunity (USDC)
-SYNTH_MAX_OPEN: int = _int("SYNTH_MAX_OPEN", 5)                 # max simultaneous synth positions
-SYNTH_MIN_LIQUIDITY: float = _float("SYNTH_MIN_LIQUIDITY", 300.0) # skip markets below this liquidity (USDC)
-SYNTH_MAX_DAYS_TO_RESOLVE: int = _int("SYNTH_MAX_DAYS_TO_RESOLVE", 7)  # skip markets resolving >N days away (0 = no limit)
-SYNTH_DAILY_LOSS_CAP: float = _float("SYNTH_DAILY_LOSS_CAP", 50.0)     # synth-only daily loss cap; independent of shared risk manager
-SYNTH_MERGE_ENABLED: bool = _bool("SYNTH_MERGE_ENABLED", True)          # attempt on-chain CTF.mergePositions() after fills for fast capital recycling
+# ── SOL Market ────────────────────────────────────────────────────────────────
+SOL_LAB_ENABLED: bool = _bool("SOL_LAB_ENABLED", True)
 
-# ── Sentiment Profile ─────────────────────────────────────────────────────────
-SENTIMENT_POLL_INTERVAL: int = _int("SENTIMENT_POLL_INTERVAL", 180)
-SENTIMENT_MAX_NEWS_AGE_HOURS: int = _int("SENTIMENT_MAX_NEWS_AGE_HOURS", 4)
-SENTIMENT_VERBOSE: bool = _bool("SENTIMENT_VERBOSE", False)
-SENTIMENT_MIN_CONFIDENCE: float = _float("SENTIMENT_MIN_CONFIDENCE", 0.65)
-SENTIMENT_MIN_URGENCY: float = _float("SENTIMENT_MIN_URGENCY", 0.45)
-SENTIMENT_MIN_EDGE: float = _float("SENTIMENT_MIN_EDGE", 0.10)
-SENTIMENT_COOLDOWN_MINUTES: int = _int("SENTIMENT_COOLDOWN_MINUTES", 60)
-SENTIMENT_MAX_CONCURRENT: int = _int("SENTIMENT_MAX_CONCURRENT", 3)
-SENTIMENT_MAX_DAILY_LOSS: float = _float("SENTIMENT_MAX_DAILY_LOSS", 50.0)
-SENTIMENT_ANALYZER: str = os.getenv("SENTIMENT_ANALYZER", "llm")
-SENTIMENT_POSITION_SIZE: float = _float("SENTIMENT_POSITION_SIZE", 5.0)
-SENTIMENT_MIN_LIQUIDITY: float = _float("SENTIMENT_MIN_LIQUIDITY", 1500.0)
-SENTIMENT_MIN_VOLUME_24H: float = _float("SENTIMENT_MIN_VOLUME_24H", 1000.0)
-SENTIMENT_MIN_RESOLUTION_MINUTES: int = _int("SENTIMENT_MIN_RESOLUTION_MINUTES", 30)
-SENTIMENT_MAX_RESOLUTION_DAYS: int = _int("SENTIMENT_MAX_RESOLUTION_DAYS", 30)
-SENTIMENT_MAX_MARKETS_PER_ITEM: int = _int("SENTIMENT_MAX_MARKETS_PER_ITEM", 2)
-SENTIMENT_REPRICE_INTERVAL_SECONDS: int = _int("SENTIMENT_REPRICE_INTERVAL_SECONDS", 120)
-SENTIMENT_PAPER_EXIT_ENABLED: bool = _bool("SENTIMENT_PAPER_EXIT_ENABLED", True)
-SENTIMENT_TIME_STOP_MINUTES: int = _int("SENTIMENT_TIME_STOP_MINUTES", 240)
-SENTIMENT_STOP_LOSS_PCT: float = _float("SENTIMENT_STOP_LOSS_PCT", 0.30)
-SENTIMENT_TAKE_PROFIT_PCT: float = _float("SENTIMENT_TAKE_PROFIT_PCT", 0.40)
-SENTIMENT_THESIS_INVALIDATION_PCT: float = _float("SENTIMENT_THESIS_INVALIDATION_PCT", 0.05)
-SENTIMENT_SCAN_INTERVAL_SECONDS: int = _int("SENTIMENT_SCAN_INTERVAL_SECONDS", 300)
-SENTIMENT_SCAN_ENABLED: bool = _bool("SENTIMENT_SCAN_ENABLED", True)
-SENTIMENT_SCAN_MAX_HOURS: float = float(os.getenv("SENTIMENT_SCAN_MAX_HOURS", "48"))
-SENTIMENT_SCAN_MIN_EDGE: float = _float("SENTIMENT_SCAN_MIN_EDGE", 0.08)
+# SOL has ~1.7–1.8x BTC daily volatility. Filters are looser on mid-price windows
+# (fewer market makers → contracts misprice more often) but stricter on OB floor
+# (higher-vol OB imbalances flip faster → need stronger signal to avoid noise).
+SOL_5M_MID_PRICE_MIN: float = _float("SOL_5M_MID_PRICE_MIN", 0.42)
+SOL_5M_MID_PRICE_MAX: float = _float("SOL_5M_MID_PRICE_MAX", 0.58)
+SOL_15M_MID_PRICE_MIN: float = _float("SOL_15M_MID_PRICE_MIN", 0.45)
+SOL_15M_MID_PRICE_MAX: float = _float("SOL_15M_MID_PRICE_MAX", 0.62)
+SOL_OB_MIN_IMBALANCE: float = _float("SOL_OB_MIN_IMBALANCE", 0.30)
+SOL_OB_SIZE_STRONG: float = _float("SOL_OB_SIZE_STRONG", 1.50)
+# SOL 5m momentum multiplier — SOL moves ~1.8x BTC/tick; apply 1.8x to the base threshold
+SOL_5M_MOMENTUM_MULT: float = _float("SOL_5M_MOMENTUM_MULT", 1.8)
+SOL_TREND_FILTER_MIN_SLOPE: float = _float("SOL_TREND_FILTER_MIN_SLOPE", 0.005)
+
+# ── XRP Market ────────────────────────────────────────────────────────────────
+XRP_LAB_ENABLED: bool = _bool("XRP_LAB_ENABLED", True)
+
+# XRP has ~1.4x BTC daily volatility. OB is thinner and more susceptible to
+# wash trading → apply stricter OB floor than BTC. Mid-price windows similar to BTC.
+XRP_5M_MID_PRICE_MIN: float = _float("XRP_5M_MID_PRICE_MIN", 0.40)
+XRP_5M_MID_PRICE_MAX: float = _float("XRP_5M_MID_PRICE_MAX", 0.58)
+XRP_15M_MID_PRICE_MIN: float = _float("XRP_15M_MID_PRICE_MIN", 0.45)
+XRP_15M_MID_PRICE_MAX: float = _float("XRP_15M_MID_PRICE_MAX", 0.62)
+XRP_OB_MIN_IMBALANCE: float = _float("XRP_OB_MIN_IMBALANCE", 0.28)
+XRP_OB_SIZE_STRONG: float = _float("XRP_OB_SIZE_STRONG", 1.50)
+# XRP 5m momentum multiplier — XRP moves ~1.4x BTC/tick
+XRP_5M_MOMENTUM_MULT: float = _float("XRP_5M_MOMENTUM_MULT", 1.4)
+XRP_TREND_FILTER_MIN_SLOPE: float = _float("XRP_TREND_FILTER_MIN_SLOPE", 0.004)
+
+# ── Latency Arb ───────────────────────────────────────────────────────────────
+LAB_BASE_SIZE_USDC: float = _float("LAB_BASE_SIZE_USDC", 50.0)
+# Base momentum threshold (0.10% per 10s window). Per-asset multipliers above
+# scale this up: SOL uses 1.8x (0.18%), XRP uses 1.4x (0.14%).
+LAB_MOMENTUM_THRESHOLD: float = _float("LAB_MOMENTUM_THRESHOLD", 0.0010)
+LAB_POLL_INTERVAL: float = _float("LAB_POLL_INTERVAL", 0.5)  # 500ms
+LAB_MAX_CONCURRENT_POSITIONS: int = _int("LAB_MAX_CONCURRENT_POSITIONS", 3)
+LAB_MAX_CONCURRENT_POSITIONS_5M: int = _int("LAB_MAX_CONCURRENT_POSITIONS_5M", LAB_MAX_CONCURRENT_POSITIONS)
+LAB_MAX_CONCURRENT_POSITIONS_15M: int = _int("LAB_MAX_CONCURRENT_POSITIONS_15M", LAB_MAX_CONCURRENT_POSITIONS)
+LAB_WINDOWS: list[int] = [int(w) for w in os.getenv("LAB_WINDOWS", "5,15").split(",")]
+LAB_15M_CONFIRM_SECONDS: int = _int("LAB_15M_CONFIRM_SECONDS", 10)
+LAB_15M_CONFIRM_RETENTION: float = _float("LAB_15M_CONFIRM_RETENTION", 0.6)
+LAB_15M_FASTTRACK_MULTIPLIER: float = _float("LAB_15M_FASTTRACK_MULTIPLIER", 2.0)
+LAB_15M_CONFIRMATION_MARGIN: float = _float("LAB_15M_CONFIRMATION_MARGIN", 0.10)
+LAB_OB_IMBALANCE_ENABLED: bool = _bool("LAB_OB_IMBALANCE_ENABLED", True)
+LAB_OB_IMBALANCE_THRESHOLD: float = _float("LAB_OB_IMBALANCE_THRESHOLD", 0.10)
+LAB_OB_SIZING_ENABLED: bool = _bool("LAB_OB_SIZING_ENABLED", True)
+LAB_OB_SIZE_WEAK: float = _float("LAB_OB_SIZE_WEAK", 0.50)
+LAB_OB_SIZE_STRONG: float = _float("LAB_OB_SIZE_STRONG", 1.50)
+LAB_OB_STRONG_THRESHOLD: float = _float("LAB_OB_STRONG_THRESHOLD", 0.60)
+OB_MIN_IMBALANCE: float = _float("OB_MIN_IMBALANCE", 0.20)       # fallback floor
+EVENING_OB_MIN_IMBALANCE: float = _float("EVENING_OB_MIN_IMBALANCE", 0.30)
+EVENING_HOURS_START: int = _int("EVENING_HOURS_START", 18)
+
+# ── CVD — trade-based taker OFI (replaces resting OBI as the entry gate) ─────
+# CVD = (buy_taker_qty - sell_taker_qty) / total_qty in the last CVD_WINDOW_SECS.
+# Range [-1, +1]: +1 = all takers are buyers; -1 = all takers are sellers.
+# Research (arXiv 2507.22712): trade-based OFI outperforms resting OBI for altcoins
+# because it captures realized pressure, not spoofed/fleeting limit orders.
+# OBI is kept for SIZING only (not as a hard entry gate).
+LAB_CVD_ENABLED: bool = _bool("LAB_CVD_ENABLED", True)
+LAB_CVD_WINDOW_SECS: float = _float("LAB_CVD_WINDOW_SECS", 10.0)
+# CVD >= STRONG_THRESHOLD in signal direction → full/boosted size (confirmed move)
+# CVD between 0 and STRONG → neutral size (move starting but not confirmed)
+# CVD against signal direction → reduced size (counterflow present)
+LAB_CVD_STRONG_THRESHOLD: float = _float("LAB_CVD_STRONG_THRESHOLD", 0.25)
+# FAST_TRACK is blocked (not just sized down) when CVD opposes direction by this much.
+# 0.35 = ~67.5% of taker volume is against the signal — indicates bull/bear trap.
+LAB_CVD_FASTTRACK_BLOCK_THRESHOLD: float = _float("LAB_CVD_FASTTRACK_BLOCK_THRESHOLD", 0.35)
+# Oracle lag gate — only enter when Binance is still ahead of Polymarket reprice.
+# Negative default = shadow mode (logs only, never blocks).
+LAB_MIN_ORACLE_LAG: float = _float("LAB_MIN_ORACLE_LAG", -999.0)
+# Near-resolution arb — enter clearly-resolved windows with < N seconds remaining.
+LAB_RESOLUTION_ARB_ENABLED: bool = _bool("LAB_RESOLUTION_ARB_ENABLED", True)
+LAB_RESOLUTION_SECS_REMAINING: float = _float("LAB_RESOLUTION_SECS_REMAINING", 120.0)
+LAB_RESOLUTION_MIN_BINANCE_MOVE: float = _float("LAB_RESOLUTION_MIN_BINANCE_MOVE", 0.003)
+LAB_RESOLUTION_MIN_MID: float = _float("LAB_RESOLUTION_MIN_MID", 0.62)
+LAB_RESOLUTION_MAX_MID: float = _float("LAB_RESOLUTION_MAX_MID", 0.85)
+TREND_FILTER_ENABLED: bool = _bool("TREND_FILTER_ENABLED", True)
+TREND_FILTER_TICKS: int = _int("TREND_FILTER_TICKS", 20)
+TREND_FILTER_MIN_SLOPE: float = _float("TREND_FILTER_SLOPE", 0.003)
+LAB_15M_MID_PRICE_MIN: float = _float("LAB_15M_MID_PRICE_MIN", 0.45)
+LAB_15M_MID_PRICE_MAX: float = _float("LAB_15M_MID_PRICE_MAX", 0.62)
+LAB_5M_MID_PRICE_MIN: float = _float("LAB_5M_MID_PRICE_MIN", 0.40)
+LAB_5M_MID_PRICE_MAX: float = _float("LAB_5M_MID_PRICE_MAX", 0.58)
+LAB_PRICE_MULT: float = _float("LAB_PRICE_MULT", 0.5)
+
+# Cross-asset momentum validator.
+# BTC is used as the reference for both SOL and XRP because its correlation with
+# BTC is stronger (0.85–0.92 / 0.70–0.82) than SOL/XRP with each other (0.60–0.75).
+# The BTC feed runs in the background for validation only — we never trade BTC.
+# Set to "" to fall back to using the other trading asset (SOL↔XRP).
+LAB_CROSS_ASSET_VALIDATOR: str = os.getenv("LAB_CROSS_ASSET_VALIDATOR", "BTC")
+
+# ── Latency Arb Active Exit ───────────────────────────────────────────────────
+LAB_EXIT_ENABLED: bool = _bool("LAB_EXIT_ENABLED", True)
+LAB_STOP_LOSS_PCT: float = _float("LAB_STOP_LOSS_PCT", 0.35)
+LAB_TAKE_PROFIT_PCT: float = _float("LAB_TAKE_PROFIT_PCT", 0.50)
+
+# ── Latency Arb Entry Guards ──────────────────────────────────────────────────
+LAB_CONSEC_LOSS_PAUSE: int = _int("LAB_CONSEC_LOSS_PAUSE", 3)
+LAB_CONSEC_LOSS_PAUSE_SECS: int = _int("LAB_CONSEC_LOSS_PAUSE_SECS", 900)
+LAB_MIN_SECS_TREND_CONFIRMED: int = _int("LAB_MIN_SECS_TREND_CONFIRMED", 300)
+LAB_STALE_FLAT_OVERNIGHT_SECS: int = _int("LAB_STALE_FLAT_OVERNIGHT_SECS", 3600)

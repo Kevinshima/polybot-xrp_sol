@@ -1,8 +1,9 @@
 """Strategy 1: Price-lag arbitrage vs. crypto exchanges.
 
-Supports multiple assets (BTC, ETH). Each asset uses its own Binance feed,
-order-book stream, trend filter, and momentum signal. They share the same
-portfolio capacity limits (MAX_CONCURRENT) and database.
+Supports SOL and XRP. Each asset uses its own Binance feed, order-book stream,
+trend filter, and momentum signal. They share the same portfolio capacity limits
+(MAX_CONCURRENT) and database. BTC is tracked as a cross-asset momentum validator
+but is never traded directly.
 """
 from __future__ import annotations
 
@@ -17,6 +18,8 @@ from config import settings
 from core.ml_model import get_ml_model
 from data.exchange_feed import get_exchange_feed
 from data.market_scanner import get_scanner
+from data.polymarket_feed import get_polymarket_feed
+from monitoring.alerter import get_alerter
 from strategies.base import BaseStrategy
 from utils.logger import logger
 
@@ -24,26 +27,23 @@ from utils.logger import logger
 class LatencyArb(BaseStrategy):
     """
     Compares Binance spot momentum against Polymarket updown-5m and updown-15m
-    markets for BTC (and optionally ETH). Buys the UP token on positive momentum
-    and the DOWN token on negative momentum when divergence exceeds threshold.
+    markets for SOL and XRP. Buys the UP token on positive momentum and the DOWN
+    token on negative momentum when divergence exceeds threshold.
+    BTC momentum is also tracked for cross-asset validation (not traded).
 
     Runs every 500ms.
     """
 
     name = "latency_arb"
 
-    CONTEXT_GATE_WINDOW_SECS = 60
-    TREND_SLOPE_THRESHOLD_PCT = 0.75
     MAX_ENTRY_MID_PRICE = 0.65
     BASE_MOMENTUM_THRESHOLD = settings.LAB_MOMENTUM_THRESHOLD
     FIFTEEN_MIN_CONFIRMATION_MULTIPLIER = 1.25
+    # Lowered from 2.0 to 1.0 for data collection phase: at 2.0 the threshold fired so late
+    # (0.24%) that Polymarket contracts were already priced >$0.85 — no edge window remaining.
+    # At 1.0, signals fire earlier (0.12%/0.15%) when contracts are still at $0.45–$0.60.
     FLAT_MOMENTUM_MULTIPLIER = 1.0
-    FLAT_OB_IMBALANCE_MULTIPLIER = 1.25
-    REJECTION_SUMMARY_INTERVAL_SECS = 12.0
-    WHIPSAW_WINDOW_SECS = 1200  # 20-minute lookback for trend flip counting
-    WHIPSAW_MAX_FLIPS = 2       # block entries if trend reversed >= this many times
-    FIFTEEN_M_FLIP_WINDOW_SECS = 1200  # 20-minute lookback for 15m trade direction flips
-    FIFTEEN_M_MAX_FLIPS = 2            # block 15m entries after this many UP↔DOWN alternations
+    REJECTION_SUMMARY_INTERVAL_SECS = 60.0
     TREND_SAMPLE_INTERVAL_SECS = 10.0
     TREND_MIN_VALID_SAMPLES = 8
     MARKET_REFRESH_INTERVAL_SECS = 20.0
@@ -56,6 +56,7 @@ class LatencyArb(BaseStrategy):
         super().__init__()
         self._exchange_feed = get_exchange_feed()
         self._scanner = get_scanner()
+        self._pm_feed = get_polymarket_feed()
         self.MAX_CONCURRENT = settings.LAB_MAX_CONCURRENT_POSITIONS
         self._branch_limits = {
             "5m": settings.LAB_MAX_CONCURRENT_POSITIONS_5M,
@@ -65,8 +66,12 @@ class LatencyArb(BaseStrategy):
             settings.TREND_FILTER_MIN_SLOPE
         )
 
-        # Active assets: always BTC, optionally ETH
-        self._assets: list[str] = ["BTC"] + (["ETH"] if settings.ETH_LAB_ENABLED else [])
+        # Active trading assets: SOL and/or XRP (enabled via settings).
+        # BTC is tracked as a cross-asset validator only — not in this list.
+        self._assets: list[str] = (
+            (["SOL"] if settings.SOL_LAB_ENABLED else []) +
+            (["XRP"] if settings.XRP_LAB_ENABLED else [])
+        )
 
         # ── Per-asset market cache ────────────────────────────────────────────
         self._current_updowns: dict[str, dict | None] = {
@@ -102,16 +107,29 @@ class LatencyArb(BaseStrategy):
         self._last_15m_direction_ts: dict[str, float | None] = {a: None for a in self._assets}
         self._last_15m_slug: dict[str, str] = {f"{a}_15m": "" for a in self._assets}
 
-        # ── Per-asset loss cooldowns (keyed: "{ASSET}_{timeframe}") ───────────
+        # ── Per-asset loss/win counters (ML features) ────────────────────────
         self._consecutive_losses: dict[str, int] = {
             f"{a}_{tf}": 0 for a in self._assets for tf in ["5m", "15m"]
         }
-        self._loss_cooldown_until: dict[str, float] = {
-            f"{a}_{tf}": 0.0 for a in self._assets for tf in ["5m", "15m"]
+        self._consecutive_wins: dict[str, int] = {
+            f"{a}_{tf}": 0 for a in self._assets for tf in ["5m", "15m"]
         }
-        self._last_cooldown_log: dict[str, float] = {
-            f"{a}_{tf}": 0.0 for a in self._assets for tf in ["5m", "15m"]
-        }
+
+        # ── Consecutive loss pause gate (time-keyed per asset+timeframe) ────────
+        self._consec_loss_pause_until: dict[str, float] = {}
+
+        # ── Strategy-level rolling circuit breaker ────────────────────────────
+        # Fires when 3+ stop-losses hit in any 90-minute window → pauses ALL
+        # entries for 2 hours. Resets automatically. Prevents May-11-style runs.
+        self._recent_stop_loss_ts: list[float] = []
+        self._circuit_breaker_until: float = 0.0
+
+        # ── Per-asset momentum delta tracking ────────────────────────────────
+        self._prev_momentum: dict[str, float] = {a: 0.0 for a in self._assets}
+
+        # ── Per-asset trend change tracking (ML features) ─────────────────────
+        self._trend_change_ts: dict[str, float] = {a: 0.0 for a in self._assets}
+        self._prev_trend_direction: dict[str, str] = {a: "WARMUP" for a in self._assets}
 
         # ── Per-asset log state ───────────────────────────────────────────────
         self._rejection_log_state: dict[str, dict] = {
@@ -128,28 +146,14 @@ class LatencyArb(BaseStrategy):
         self._cooldown: dict[str, dict[str, float]] = {"5m": {}, "15m": {}}
         self._pending_15m: dict[str, dict] = {}
         self._entered_15m_slugs: set[str] = set()
+        # Binance price recorded when each 15m slug is first seen — used for oracle lag
+        self._window_open_snapshots: dict[str, dict] = {}
         self._holding_logged: set[str] = set()
         self._last_mid_discard_ts: dict[str, float] = {}
 
-        # ── Anti-correlation gate: prevent simultaneous BTC+ETH 5m entries ──
-        self._last_5m_entry_ts: float = 0.0
-        self._5m_anti_corr_window: float = 30.0  # seconds
-
-        # ── Per-asset 15m momentum cache (used by 5m adverse-context gate) ──
-        self._current_momentum_15m: dict[str, float] = {a: 0.0 for a in self._assets}
-
-        # ── Per-asset whipsaw guard ──────────────────────────────────────────
-        # Records timestamps of UP↔DOWN trend reversals (ignores FLAT transitions)
-        self._trend_flip_ts: dict[str, deque] = {a: deque() for a in self._assets}
-        self._last_directional_trend: dict[str, str | None] = {a: None for a in self._assets}
-
-        # ── Per-asset 15m trade flip counter ────────────────────────────────
-        # Tracks actual 15m trade direction alternations (UP→DOWN→UP = 2 flips).
-        # Separate from the Binance-slope whipsaw guard — this one watches the bot's
-        # own 15m trade decisions, catching the April-20 pattern where 15m signals
-        # kept alternating direction every 15-30 min while Binance slope stayed FLAT.
-        self._15m_trade_flip_ts: dict[str, deque] = {a: deque() for a in self._assets}
-        self._last_15m_trade_direction: dict[str, str | None] = {a: None for a in self._assets}
+        # ── Price-skip throttle: don't hammer get_midpoint when market is already priced ──
+        # When _trade_updown returns False due to price checks, wait 15s before retrying
+        self._price_skip_until: dict[str, float] = {}
 
         # ── Post-restart lockout ─────────────────────────────────────────────
         # Block all new entries for 15 minutes after startup so that the momentum
@@ -228,16 +232,17 @@ class LatencyArb(BaseStrategy):
                 )
             return
         fast_momentum = self._exchange_feed.get_momentum(symbol)
+        _momentum_delta = fast_momentum - self._prev_momentum.get(asset, fast_momentum)
+        self._prev_momentum[asset] = fast_momentum
 
         if now - self._last_trend_sample_ts[asset] >= self.TREND_SAMPLE_INTERVAL_SECS:
             self._update_trend(asset, price)
             self._last_trend_sample_ts[asset] = now
 
         momentum_15m = self._momentum_for_timeframe(asset, "15m", fast_momentum)
-        self._current_momentum_15m[asset] = momentum_15m
         required_momentum_5m = self._momentum_threshold_for_current_trend(asset)
 
-        if now - self._last_momentum_log[asset] >= 60:
+        if now - self._last_momentum_log[asset] >= 15:
             ob_imbalance = self._exchange_feed.get_order_book_imbalance(symbol)
             ob_str = f"{ob_imbalance:+.3f}" if ob_imbalance is not None else "None"
             required_momentum_15m = self._15m_required_momentum(asset)
@@ -251,8 +256,7 @@ class LatencyArb(BaseStrategy):
                 if self._trend_state_label(asset) != "WARMUP"
                 else "n/a"
             )
-            _log = logger.info if notable else logger.debug
-            _log(
+            logger.debug(
                 f"LatencyArb tick: {asset}={price:.2f} momentum_5m={fast_momentum:+.4%} "
                 f"momentum_15m={momentum_15m:+.4%} "
                 f"OB={ob_str} threshold_5m={required_momentum_5m:.3%} "
@@ -290,14 +294,22 @@ class LatencyArb(BaseStrategy):
                 branch_open_count=branch_open_count["15m"],
                 total_open_count=total_open_count,
                 cooldown_state=cooldown_state_15m,
+                momentum_delta=_momentum_delta,
             )
+
+        # Resolution arb: near-window-end entries on clearly-resolved markets
+        await self._resolution_arb_check(asset, can_trade_15m, branch_open_count, total_open_count)
 
         can_trade_5m, reason_5m, cooldown_state_5m = self._branch_trade_availability(
             asset, "5m", branch_open_count, total_open_count
         )
-        # BTC 5m gets a stricter momentum floor to filter out noise entries
-        if asset == "BTC":
-            required_momentum_5m *= settings.BTC_5M_MOMENTUM_MULT
+        # Per-asset 5m momentum multiplier — higher-vol assets need a stricter floor.
+        # SOL: 1.8x (moves ~1.7–1.8x BTC per 10s); XRP: 1.4x (moves ~1.4x BTC).
+        _5m_mult = {
+            "SOL": settings.SOL_5M_MOMENTUM_MULT,
+            "XRP": settings.XRP_5M_MOMENTUM_MULT,
+        }.get(asset, 1.0)
+        required_momentum_5m *= _5m_mult
         if abs(fast_momentum) < required_momentum_5m:
             self._log_rejection(
                 asset, "5m",
@@ -327,18 +339,33 @@ class LatencyArb(BaseStrategy):
             if (
                 time.time() - cooldown_map.get(slug_5m, 0) >= 300
                 and slug_5m not in self._traded_this_cycle
+                and time.time() >= self._price_skip_until.get(slug_5m, 0)
             ):
-                self._traded_this_cycle.add(slug_5m)
-                cooldown_map[slug_5m] = time.time()
-                await self._trade_updown(market_5m, asset, fast_momentum)
+                traded = await self._trade_updown(
+                    market_5m, asset, fast_momentum,
+                    entry_path="5M_DIRECT", momentum_delta=_momentum_delta,
+                )
+                if traded:
+                    self._traded_this_cycle.add(slug_5m)
+                    cooldown_map[slug_5m] = time.time()
+                else:
+                    # Price check failed — throttle retries for 15s to avoid hammering API
+                    self._price_skip_until[slug_5m] = time.time() + 15.0
             else:
                 remaining = max(0.0, 300 - (time.time() - cooldown_map.get(slug_5m, 0)))
+                if remaining > 0:
+                    _reason, _cd = "cooldown_active", f"{remaining:.0f}s"
+                elif slug_5m in self._traded_this_cycle:
+                    _reason, _cd = "already_traded_this_cycle", "inactive"
+                else:
+                    price_skip_rem = max(0.0, self._price_skip_until.get(slug_5m, 0) - time.time())
+                    _reason, _cd = "price_skip_active", f"{price_skip_rem:.0f}s"
                 self._log_rejection(
                     asset, "5m",
-                    "cooldown_active",
+                    _reason,
                     momentum=fast_momentum,
                     threshold=required_momentum_5m,
-                    cooldown_state=f"{remaining:.0f}s",
+                    cooldown_state=_cd,
                     branch_open_count=branch_open_count["5m"],
                 )
 
@@ -372,6 +399,11 @@ class LatencyArb(BaseStrategy):
                 if market is not None:
                     self._current_updowns[key] = market
                     self._market_data_ts[key] = now
+                    # Subscribe new token IDs to the Polymarket feed for real-time prices
+                    self._pm_feed.subscribe([
+                        market["up_token_id"],
+                        market["down_token_id"],
+                    ])
                 # else: keep stale data — circuit breaker or API hiccup;
                 # do NOT overwrite with None so ticks can still attempt trades
 
@@ -384,7 +416,15 @@ class LatencyArb(BaseStrategy):
                     "may be open. Trading suspended until API recovers."
                 )
 
-    async def _trade_updown(self, updown: dict, asset: str, momentum: float) -> None:
+    async def _trade_updown(
+        self,
+        updown: dict,
+        asset: str,
+        momentum: float,
+        entry_path: str = "5M_DIRECT",
+        ob_at_queue_time: float | None = None,
+        momentum_delta: float | None = None,
+    ) -> bool:
         """Trade an updown market based on exchange momentum."""
         symbol = f"{asset}/USDT"
         market = updown["market"]
@@ -400,10 +440,55 @@ class LatencyArb(BaseStrategy):
 
         if not market.get("acceptingOrders", True):
             logger.debug(f"LatencyArb: SKIPPED {slug} — market not accepting orders")
-            return
+            return False
         if self._portfolio.has_position(market_id):
             logger.debug(f"LatencyArb: SKIPPED {slug} — already have position")
-            return
+            return False
+
+        # ── Strategy-level circuit breaker ────────────────────────────────────
+        # Blocks ALL new entries when 3+ stop-losses have hit in the last 90 min.
+        if time.time() < self._circuit_breaker_until:
+            _cb_rem = int(self._circuit_breaker_until - time.time())
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=circuit_breaker "
+                f"{_cb_rem}s remaining"
+            )
+            return False
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Resolution arb fast-path ─────────────────────────────────────────
+        # Near-window-end entries: direction from net Binance move, not momentum threshold.
+        # Skips all quality filters — certainty comes from time + price convergence.
+        if entry_path == "RESOLUTION_ARB":
+            direction = "UP" if momentum > 0 else "DOWN"
+            _res_token = updown["up_token_id"] if direction == "UP" else updown["down_token_id"]
+            if any(p.token_id == _res_token for p in self._portfolio.all_positions()):
+                return False
+            try:
+                _res_mid = await asyncio.get_running_loop().run_in_executor(
+                    None, self._client.get_midpoint, _res_token
+                )
+            except Exception:
+                return False
+            if _res_mid < settings.LAB_RESOLUTION_MIN_MID or _res_mid > settings.LAB_RESOLUTION_MAX_MID:
+                return False
+            _res_size = min(settings.LAB_BASE_SIZE_USDC * 0.75, settings.MAX_POSITION_SIZE_USDC)
+            _res_market = updown["market"]
+            _res_market_id = _res_market.get("conditionId") or _res_market.get("id", "")
+            logger.info(
+                f"LatencyArb: RESOLUTION ARB [{asset}] {timeframe} direction={direction} "
+                f"mid={_res_mid:.3f} size=${_res_size:.2f} net_move={momentum:+.4%}"
+            )
+            self._execute_signal(
+                _res_market_id, _res_token, updown.get("question", slug),
+                "BUY", _res_mid, _res_size,
+                momentum, f"{symbol} ({direction}) [{slug}]",
+                timeframe=timeframe, window_slug=slug, asset=asset,
+                entry_path="RESOLUTION_ARB",
+            )
+            return True
+        # ─────────────────────────────────────────────────────────────────────
+
         direction = self._direction_from_momentum(momentum, required_momentum)
         if direction is None:
             self._log_rejection(
@@ -413,18 +498,22 @@ class LatencyArb(BaseStrategy):
                 threshold=required_momentum,
                 branch_open_count=self._latency_open_counts()[0].get(timeframe, 0),
             )
-            return
+            return False
 
-        # Skip if too little time remains in the current window
-        min_remaining = 90 if timeframe == "15m" else 60
+        # Skip if too little time remains in the current window.
+        # Raised from 90s/60s to 240s/120s: binary token prices are extremely sensitive
+        # near expiry — a 35% stop-loss can trigger in under 30s during the final 90s.
+        # With 240s (4 min) floor: the position has time to breathe before the token
+        # converges aggressively toward 0 or 1.
+        min_remaining = 240 if timeframe == "15m" else 120
         window_secs = 900 if timeframe == "15m" else 300
         ts = (int(time.time()) // window_secs) * window_secs
         seconds_remaining = ts + window_secs - time.time()
         if seconds_remaining < min_remaining:
-            logger.info(
+            logger.debug(
                 f"LatencyArb: skipping {slug} — only {seconds_remaining:.0f}s remaining in window"
             )
-            return
+            return False
 
         token_id = updown["up_token_id"] if direction == "UP" else updown["down_token_id"]
 
@@ -435,87 +524,76 @@ class LatencyArb(BaseStrategy):
             logger.debug(
                 f"LatencyArb: SKIPPED {slug} — already holding token {token_id[:16]}…"
             )
-            return
+            return False
 
-        try:
-            mid = await asyncio.get_running_loop().run_in_executor(
-                None, self._client.get_midpoint, token_id
-            )
-        except Exception:
-            return
+        # Prefer real-time ask price from PM WebSocket feed (sub-ms, no HTTP call).
+        # We pay the ask when buying — using ask gives an accurate effective entry.
+        # Falls back to HTTP get_midpoint if feed data is stale or not yet received.
+        mid = self._pm_feed.get_best_ask(token_id)
+        if mid is None or not (0 < mid < 1):
+            try:
+                mid = await asyncio.get_running_loop().run_in_executor(
+                    None, self._client.get_midpoint, token_id
+                )
+            except Exception:
+                return False
+        else:
+            logger.debug(f"PM feed: using live ask={mid:.4f} for {token_id[:16]}… (skipping HTTP)")
+
+        # ── Oracle lag computation ────────────────────────────────────────────
+        # How much of the Binance move has Polymarket already priced?
+        # lag_proxy > 0 = Binance still ahead, edge open.
+        # lag_proxy < 0 = Polymarket caught up, edge closed.
+        # LAB_MIN_ORACLE_LAG = -999 (shadow/log mode) — set > 0 to activate gate.
+        _open_snap = self._window_open_snapshots.get(slug)
+        if _open_snap and _open_snap.get("binance_price", 0) > 0:
+            _current_binance = self._exchange_feed.get_price(symbol) or 0.0
+            if _current_binance > 0:
+                _binance_move = (
+                    abs(_current_binance - _open_snap["binance_price"])
+                    / _open_snap["binance_price"]
+                )
+                _pm_from_neutral = abs(mid - 0.50)
+                _lag_proxy = _binance_move - (_pm_from_neutral * 2.0)
+                logger.info(
+                    f"Oracle lag [{asset}]: binance_move={_binance_move:.4%} "
+                    f"pm_dist={_pm_from_neutral:.3f} lag={_lag_proxy:+.4f} path={entry_path}"
+                )
+                if _lag_proxy < settings.LAB_MIN_ORACLE_LAG:
+                    logger.info(
+                        f"LatencyArb reject [{asset}]: {timeframe} reason=oracle_lag_closed "
+                        f"lag={_lag_proxy:.4f} < {settings.LAB_MIN_ORACLE_LAG} path={entry_path}"
+                    )
+                    return False
+        # ─────────────────────────────────────────────────────────────────────
 
         if mid <= 0 or mid >= 1:
-            return
+            return False
         if mid < 0.20:
-            return
+            return False
         if mid > self.MAX_ENTRY_MID_PRICE:
             required_win_rate = mid * 100
-            logger.info(
+            logger.debug(
                 f"LatencyArb: SKIPPED {slug} — entry price {mid:.3f} exceeds max "
                 f"{self.MAX_ENTRY_MID_PRICE} (break-even would require {required_win_rate:.0f}% win rate)"
             )
-            return
+            return False
         if timeframe == "5m":
-            _5m_min = settings.ETH_5M_MID_PRICE_MIN if asset == "ETH" else settings.LAB_5M_MID_PRICE_MIN
-            _5m_max = settings.ETH_5M_MID_PRICE_MAX if asset == "ETH" else settings.LAB_5M_MID_PRICE_MAX
+            _5m_min, _5m_max = self._mid_price_window(asset, "5m")
             if mid < _5m_min or mid > _5m_max:
-                logger.info(
+                logger.debug(
                     f"LatencyArb: SKIPPED {slug} — 5m mid-price {mid:.3f} outside window "
                     f"[{_5m_min:.3f}, {_5m_max:.3f}]"
                 )
-                return
-
-        # Anti-correlation gate: if another 5m position opened in the last 30s, skip
-        if timeframe == "5m":
-            since_last_5m = time.time() - self._last_5m_entry_ts
-            if since_last_5m < self._5m_anti_corr_window:
-                logger.info(
-                    f"LatencyArb: SKIPPED {slug} — anti-correlation gate "
-                    f"(another 5m opened {since_last_5m:.0f}s ago)"
+                return False
+        elif timeframe == "15m":
+            _15m_min, _15m_max = self._mid_price_window(asset, "15m")
+            if mid < _15m_min or mid > _15m_max:
+                logger.debug(
+                    f"LatencyArb: SKIPPED {slug} — 15m mid-price {mid:.3f} outside window "
+                    f"[{_15m_min:.3f}, {_15m_max:.3f}]"
                 )
-                return
-
-        # Adverse 15m context gate: block 5m entries where the 15m momentum
-        # is working against the trade direction (UP into downtrend, DOWN into uptrend)
-        if timeframe == "5m":
-            mom_15m = self._current_momentum_15m.get(asset, 0.0)
-            adverse_threshold = 0.0005  # 0.05%
-            if direction == "UP" and mom_15m < -adverse_threshold:
-                logger.info(
-                    f"LatencyArb: SKIPPED {slug} — adverse 15m context "
-                    f"(5m=UP but momentum_15m={mom_15m:+.4%})"
-                )
-                return
-            if direction == "DOWN" and mom_15m > adverse_threshold:
-                logger.info(
-                    f"LatencyArb: SKIPPED {slug} — adverse 15m context "
-                    f"(5m=DOWN but momentum_15m={mom_15m:+.4%})"
-                )
-                return
-
-        # Whipsaw guard — skip all entries when trend has reversed direction too many times
-        # recently. This catches volatile BTC/ETH periods where signals have no edge.
-        flip_count = self._count_recent_flips(asset)
-        if flip_count >= self.WHIPSAW_MAX_FLIPS:
-            logger.info(
-                f"LatencyArb: SKIPPED {slug} — whipsaw guard "
-                f"({flip_count} trend reversals in last {self.WHIPSAW_WINDOW_SECS // 60}min)"
-            )
-            return
-
-        # 15m flip counter gate — block 15m entries when the bot's own 15m trade
-        # direction has alternated too many times in the recent window. This specifically
-        # catches the April-20 pattern where 15m momentum flipped UP↔DOWN every 15-30 min
-        # while the Binance slope stayed FLAT (so the whipsaw guard above didn't fire).
-        if timeframe == "15m":
-            flip_count_15m = self._count_recent_15m_flips(asset)
-            if flip_count_15m >= self.FIFTEEN_M_MAX_FLIPS:
-                logger.info(
-                    f"LatencyArb: SKIPPED {slug} — 15m flip guard "
-                    f"({flip_count_15m} trade direction flips in last "
-                    f"{self.FIFTEEN_M_FLIP_WINDOW_SECS // 60}min)"
-                )
-                return
+                return False
 
         base_size = settings.LAB_BASE_SIZE_USDC
 
@@ -546,55 +624,14 @@ class LatencyArb(BaseStrategy):
 
         size_usdc = min(base_size * price_mult * momentum_mult, base_size * 2)
 
-        # Track imbalance at None so it's always defined at the call site below
-        imbalance: float | None = None
-
-        # Order book imbalance filter — use the correct asset's OB
-        if settings.LAB_OB_IMBALANCE_ENABLED:
-            imbalance = self._exchange_feed.get_order_book_imbalance(symbol)
-            if imbalance is not None:
-                directional_ob_threshold = settings.LAB_OB_IMBALANCE_THRESHOLD
-                ob_floor = self._get_ob_floor(asset)
-                if self._is_flat_trend(asset):
-                    directional_ob_threshold *= self.FLAT_OB_IMBALANCE_MULTIPLIER
-                    ob_floor = max(ob_floor, directional_ob_threshold)
-                if abs(imbalance) < ob_floor:
-                    evening = datetime.now().hour >= settings.EVENING_HOURS_START
-                    label = " [evening floor]" if evening else ""
-                    if self._is_flat_trend(asset):
-                        label += " [flat filter]"
-                    self._log_rejection(
-                        asset, timeframe,
-                        "weak_ob",
-                        momentum=momentum,
-                        threshold=required_momentum,
-                        ob_signal=imbalance,
-                        branch_open_count=self._latency_open_counts()[0].get(timeframe, 0),
-                        extra=f" slug={slug} needed>={ob_floor:.3f}{label}",
-                    )
-                    return
-                if direction == "UP" and imbalance < directional_ob_threshold:
-                    self._log_rejection(
-                        asset, timeframe,
-                        "weak_ob",
-                        momentum=momentum,
-                        threshold=required_momentum,
-                        ob_signal=imbalance,
-                        branch_open_count=self._latency_open_counts()[0].get(timeframe, 0),
-                        extra=f" slug={slug} needed>={directional_ob_threshold:.3f} direction=UP",
-                    )
-                    return
-                if direction == "DOWN" and imbalance > -directional_ob_threshold:
-                    self._log_rejection(
-                        asset, timeframe,
-                        "weak_ob",
-                        momentum=momentum,
-                        threshold=required_momentum,
-                        ob_signal=imbalance,
-                        branch_open_count=self._latency_open_counts()[0].get(timeframe, 0),
-                        extra=f" slug={slug} needed<={-directional_ob_threshold:.3f} direction=DOWN",
-                    )
-                    return
+        # Fetch both signals now — used for sizing and ML recording.
+        # OBI is NO LONGER a hard entry gate (research: resting book is spoofed on altcoins).
+        # CVD (trade-based OFI) is the primary sizing signal.
+        imbalance: float | None = self._exchange_feed.get_order_book_imbalance(symbol)
+        _cvd: float | None = (
+            self._exchange_feed.get_cvd(symbol, settings.LAB_CVD_WINDOW_SECS)
+            if settings.LAB_CVD_ENABLED else None
+        )
 
         # Trend filter — skip entries that contradict the current asset trend
         if settings.TREND_FILTER_ENABLED and self._trend_direction[asset] is not None:
@@ -610,83 +647,290 @@ class LatencyArb(BaseStrategy):
                         f"slope={self._last_slope[asset]:+.5f}"
                     ),
                 )
-                return
+                return False
 
-        # Order book sizing
+        # ── CVD + OBI combined sizing ─────────────────────────────────────────
+        # CVD (trade-based OFI) is primary — more predictive than resting OBI for altcoins.
+        # OBI is fallback when CVD buffer hasn't filled yet (first ~10s after startup).
+        # Neither is a hard gate: entries are allowed regardless, size is adjusted.
         ob_mult = 1.0
         ob_tier = "NORMAL"
-        if settings.LAB_OB_SIZING_ENABLED:
-            imbalance = self._exchange_feed.get_order_book_imbalance(symbol)
-            if imbalance is not None:
-                abs_imbalance = abs(imbalance)
-                if abs_imbalance >= settings.LAB_OB_STRONG_THRESHOLD:
-                    ob_mult = settings.ETH_OB_SIZE_STRONG if asset == "ETH" else settings.LAB_OB_SIZE_STRONG
-                    ob_tier = "STRONG"
-                elif abs_imbalance >= settings.LAB_OB_IMBALANCE_THRESHOLD:
+        cvd_str = f"{_cvd:+.4f}" if _cvd is not None else "n/a"
+
+        if _cvd is not None:
+            cvd_strong = settings.LAB_CVD_STRONG_THRESHOLD
+            if direction == "UP":
+                if _cvd >= cvd_strong:
+                    ob_mult = settings.LAB_OB_SIZE_STRONG    # strong buy flow confirms UP
+                    ob_tier = "CVD_STRONG"
+                elif _cvd >= 0:
+                    ob_mult = 1.0                             # neutral-positive: normal size
+                    ob_tier = "CVD_NEUTRAL"
+                else:
+                    ob_mult = settings.LAB_OB_SIZE_WEAK      # sell flow present: reduce size
+                    ob_tier = "CVD_WEAK"
+            else:  # DOWN
+                if _cvd <= -cvd_strong:
+                    ob_mult = settings.LAB_OB_SIZE_STRONG
+                    ob_tier = "CVD_STRONG"
+                elif _cvd <= 0:
                     ob_mult = 1.0
-                    ob_tier = "NORMAL"
+                    ob_tier = "CVD_NEUTRAL"
                 else:
                     ob_mult = settings.LAB_OB_SIZE_WEAK
-                    ob_tier = "WEAK"
-                size_usdc = size_usdc * ob_mult
-                logger.info(
-                    f"LatencyArb OB sizing ({asset}): imbalance={imbalance:+.3f} "
-                    f"tier={ob_tier} mult={ob_mult:.2f}x → size=${size_usdc:.2f}"
-                )
+                    ob_tier = "CVD_WEAK"
+            size_usdc = size_usdc * ob_mult
+            logger.info(
+                f"LatencyArb CVD sizing ({asset}): cvd={cvd_str} "
+                f"tier={ob_tier} mult={ob_mult:.2f}x → size=${size_usdc:.2f} "
+                f"(direction={direction} obi={f'{imbalance:+.3f}' if imbalance is not None else 'n/a'})"
+            )
+        elif settings.LAB_OB_SIZING_ENABLED and imbalance is not None:
+            # Fallback: OBI sizing when CVD buffer not yet ready
+            abs_imbalance = abs(imbalance)
+            if abs_imbalance >= settings.LAB_OB_STRONG_THRESHOLD:
+                ob_mult = self._ob_strong_size_mult(asset)
+                ob_tier = "OBI_STRONG"
+            elif abs_imbalance >= settings.LAB_OB_IMBALANCE_THRESHOLD:
+                ob_mult = 1.0
+                ob_tier = "OBI_NORMAL"
+            else:
+                ob_mult = settings.LAB_OB_SIZE_WEAK
+                ob_tier = "OBI_WEAK"
+            size_usdc = size_usdc * ob_mult
+            logger.info(
+                f"LatencyArb OBI sizing fallback ({asset}): obi={imbalance:+.3f} "
+                f"tier={ob_tier} mult={ob_mult:.2f}x → size=${size_usdc:.2f}"
+            )
+
+        # 2.0x momentum multiplier requires CVD_STRONG confirmation.
+        # Without confirmed taker flow, the extra size is not earned — cap at 1.5x.
+        # T14/T15 both used 2.0x on CVD_WEAK/NEUTRAL and hit max position on losing signals.
+        if momentum_mult == 2.0 and ob_tier not in ("CVD_STRONG", "OBI_STRONG"):
+            capped_size = min(base_size * price_mult * 1.5 * ob_mult, base_size * 2)
+            logger.info(
+                f"LatencyArb: momentum_mult 2.0x→1.5x [{asset}]: {ob_tier} not strong, "
+                f"size ${size_usdc:.2f}→${capped_size:.2f}"
+            )
+            size_usdc = capped_size
 
         # Hard ceiling — never exceed MAX_POSITION_SIZE_USDC regardless of multipliers
         size_usdc = min(size_usdc, settings.MAX_POSITION_SIZE_USDC)
 
         logger.info(
             f"LatencyArb size ({asset}): base=${base_size:.0f} "
-            f"price_mult={price_mult:.2f} momentum_mult={momentum_mult} ob_mult={ob_mult:.2f}x "
-            f"→ size=${size_usdc:.2f} (mid={mid:.3f} momentum={momentum:+.4%})"
+            f"price_mult={price_mult:.2f} momentum_mult={momentum_mult} {ob_tier}_mult={ob_mult:.2f}x "
+            f"→ size=${size_usdc:.2f} (mid={mid:.3f} momentum={momentum:+.4%} cvd={cvd_str})"
         )
 
-        # Record 5m entry timestamp for anti-correlation gate
-        if timeframe == "5m":
-            self._last_5m_entry_ts = time.time()
+        # ── CVD hard block for FAST_TRACK ─────────────────────────────────────
+        # Sizing down to 0.5x still loses money when CVD strongly opposes direction.
+        # A price spike against dominant taker flow is a bull/bear trap — block it.
+        # Threshold 0.35 = ~67.5% of taker volume is against the signal direction.
+        if (entry_path == "FAST_TRACK"
+                and ob_tier == "CVD_WEAK"
+                and _cvd is not None
+                and abs(_cvd) >= settings.LAB_CVD_FASTTRACK_BLOCK_THRESHOLD):
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=cvd_opposes_fasttrack "
+                f"cvd={_cvd:.3f} threshold=±{settings.LAB_CVD_FASTTRACK_BLOCK_THRESHOLD} path=FAST_TRACK"
+            )
+            return False
 
-        # Record 15m trade direction for flip counter
-        if timeframe == "15m":
-            prev_15m_dir = self._last_15m_trade_direction[asset]
-            if prev_15m_dir is not None and prev_15m_dir != direction:
-                self._15m_trade_flip_ts[asset].append(time.time())
-                logger.info(
-                    f"15m flip guard [{asset}]: trade direction {prev_15m_dir}→{direction} "
-                    f"(flips in last {self.FIFTEEN_M_FLIP_WINDOW_SECS // 60}min: "
-                    f"{self._count_recent_15m_flips(asset)})"
-                )
-            self._last_15m_trade_direction[asset] = direction
-            # Prune stale flip timestamps
-            cutoff = time.time() - self.FIFTEEN_M_FLIP_WINDOW_SECS
-            while self._15m_trade_flip_ts[asset] and self._15m_trade_flip_ts[asset][0] < cutoff:
-                self._15m_trade_flip_ts[asset].popleft()
+        # ── SOL UP: require positive CVD ──────────────────────────────────────
+        # SOL UP + negative CVD = pump not backed by taker flow → mean-reverts.
+        # XRP UP runs at 87% WR; SOL UP at 38%. Filtering to CVD>0 removes non-confirmed pumps.
+        if asset == "SOL" and direction == "UP" and _cvd is not None and _cvd <= 0:
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=sol_up_no_cvd "
+                f"cvd={_cvd:.3f} <= 0 direction=UP path={entry_path}"
+            )
+            return False
+        # ─────────────────────────────────────────────────────────────────────
 
         _consec_key = f"{asset}_{timeframe}"
         _consec_losses = self._consecutive_losses.get(_consec_key, 0)
+        _consec_wins = self._consecutive_wins.get(_consec_key, 0)
+
+        # ── Consecutive loss gate ─────────────────────────────────────────────
+        _gate_until = self._consec_loss_pause_until.get(_consec_key, 0.0)
+        if time.time() < _gate_until:
+            _gate_remaining = _gate_until - time.time()
+            logger.info(
+                f"LatencyArb: CONSEC-LOSS GATE BLOCKING [{_consec_key}] — "
+                f"{_gate_remaining:.0f}s remaining (losses={_consec_losses}) path={entry_path}"
+            )
+            return False
+        # ─────────────────────────────────────────────────────────────────────
+        _secs_since_trend = time.time() - self._trend_change_ts.get(asset, 0)
+
+        # ── Fresh-trend filter ────────────────────────────────────────────────
+        # CONFIRMED entries require the trend to be at least LAB_MIN_SECS_TREND_CONFIRMED
+        # seconds old. The 60-300s window has WR=33% — trend hasn't established itself.
+        # FAST_TRACK is exempt: extreme momentum breakouts are valid on fresh trends.
+        if entry_path == "CONFIRMED" and _secs_since_trend < settings.LAB_MIN_SECS_TREND_CONFIRMED:
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=fresh_trend "
+                f"secs={_secs_since_trend:.0f}s < {settings.LAB_MIN_SECS_TREND_CONFIRMED}s "
+                f"path={entry_path} momentum={momentum:+.4%}"
+            )
+            return False
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Stale-FLAT overnight filter ───────────────────────────────────────
+        # CONFIRMED entries are blocked when the trend has been unchanged for
+        # >= LAB_STALE_FLAT_OVERNIGHT_SECS during overnight hours.
+        # SOL: 21:00–06:00 UTC (EU open at 06:00 injects flow)
+        # XRP: no overnight block — Asian session (00:00–08:00 UTC) is prime volume
+        # FAST_TRACK is exempt — extreme momentum is valid even overnight.
+        _utc_hour = int((time.time() % 86400) / 3600)
+        if asset == "XRP":
+            _is_overnight = False
+        else:  # SOL
+            _is_overnight = _utc_hour >= 21 or _utc_hour < 6
+        if (entry_path == "CONFIRMED"
+                and _is_overnight
+                and _secs_since_trend >= settings.LAB_STALE_FLAT_OVERNIGHT_SECS):
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=stale_flat_overnight "
+                f"secs={_secs_since_trend:.0f}s >= {settings.LAB_STALE_FLAT_OVERNIGHT_SECS}s "
+                f"utc_hour={_utc_hour} path={entry_path} momentum={momentum:+.4%}"
+            )
+            return False
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Momentum delta direction filter (5M_DIRECT only) ────────────────
+        # CONFIRMED path: delta removed — a 5s confirmation period already validates
+        # the signal. Sustained momentum has delta≈0 by definition (plateauing, not
+        # accelerating), so the delta check was structurally killing all CONFIRMED entries.
+        # 5M_DIRECT: keep delta filter (fast, unconfirmed signals need more validation).
+        # CVD override: strong taker flow in signal direction bypasses a zero/flat delta.
+        if entry_path == "5M_DIRECT" and momentum_delta is not None:
+            _delta_aligned = (
+                (momentum > 0 and momentum_delta > 0) or
+                (momentum < 0 and momentum_delta < 0)
+            )
+            _cvd_confirms = (
+                _cvd is not None and (
+                    (momentum > 0 and _cvd >= settings.LAB_CVD_STRONG_THRESHOLD) or
+                    (momentum < 0 and _cvd <= -settings.LAB_CVD_STRONG_THRESHOLD)
+                )
+            )
+            if (momentum_delta == 0 or not _delta_aligned) and not _cvd_confirms:
+                logger.info(
+                    f"LatencyArb reject [{asset}]: {timeframe} reason=delta_not_aligned "
+                    f"momentum={momentum:+.4%} delta={momentum_delta:+.4%} "
+                    f"cvd={f'{_cvd:.3f}' if _cvd is not None else 'n/a'} path={entry_path}"
+                )
+                return False
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── FAST_TRACK freshness guards ───────────────────────────────────────
+        # Too fresh (<120s): trend just declared after bot warmup — only 8 price
+        # samples (80s). Post-restart analysis shows T03/T06/T14/T15 all fired
+        # within 14–107s of a brand-new FLAT trend and all lost. The trend label
+        # at this age is noise, not signal.
+        if entry_path == "FAST_TRACK" and _secs_since_trend < 120:
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=ft_too_fresh "
+                f"secs={_secs_since_trend:.0f}s < 120s path=FAST_TRACK"
+            )
+            return False
+        # Danger zone (3–7 min): initial move partially priced, trend going stale.
+        # Historical WR: 34% (n=32). Oracle lag reopens after 7min.
+        if entry_path == "FAST_TRACK" and 180 < _secs_since_trend < 420:
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=ft_danger_zone "
+                f"secs={_secs_since_trend:.0f}s in 3-7min bucket (WR=34%) path=FAST_TRACK"
+            )
+            return False
+        # ─────────────────────────────────────────────────────────────────────
+
+        _prev_trend = self._prev_trend_direction.get(asset)
+        # Use _last_logged_trend (stores "FLAT"/"UP"/"DOWN"/"WARMUP") — not _trend_direction
+        # which stores None for FLAT, making FLAT indistinguishable from missing data.
+        _trend_label = self._last_logged_trend.get(asset)
+
+        # cross_asset_agree: smart two-tier validation.
+        # Independent move (only SOL or only XRP moving): peer validates the other.
+        #   e.g. SOL spikes while XRP is flat → XRP agreement = genuine crypto move.
+        # Correlated move (both SOL and XRP moving same direction simultaneously):
+        #   peer validation is useless (they co-validate noise). Require BTC as an
+        #   independent third-party check to filter correlated flash pumps.
+        _other_threshold = settings.LAB_MOMENTUM_THRESHOLD
+        _peer_asset = "XRP" if asset == "SOL" else "SOL"
+        _peer_momentum = self._exchange_feed.get_momentum(f"{_peer_asset}/USDT") or 0.0
+        _peer_moving_same = (
+            self._direction_from_momentum(_peer_momentum, _other_threshold) == direction
+        )
+        if _peer_moving_same:
+            # Both assets moving together — use BTC as independent validator
+            _validator = "BTC"
+            _validator_momentum = self._exchange_feed.get_momentum("BTC/USDT") or 0.0
+        else:
+            # Independent move — peer is the validator
+            _validator = _peer_asset
+            _validator_momentum = _peer_momentum
+        _cross_asset_agree = int(
+            self._direction_from_momentum(_validator_momentum, _other_threshold) == direction
+        )
+
+        # asset_range_15m: normalized price range over the last 15m of signal history
+        _now_ts = time.time()
+        _prices_15m = [p for ts, p in self._signal_history[asset] if _now_ts - ts <= 900.0 and p > 0]
+        _asset_range_15m = (
+            (max(_prices_15m) - min(_prices_15m)) / (sum(_prices_15m) / len(_prices_15m))
+            if len(_prices_15m) >= 2 else 0.0
+        )
+
+        # ── Cross-asset agreement gate ────────────────────────────────────────
+        # FAST_TRACK: exempt for independent moves. When both SOL+XRP move together
+        # BTC must agree (correlated flash pumps fool peer validation).
+        # CONFIRMED: only requires CA when the peer is also moving the same direction.
+        #   Independent CONFIRMED moves (SOL up, XRP flat) don't need CA — the 5s
+        #   confirmation window already validates the signal on its own.
+        # 5M_DIRECT: no CA requirement — short 5m signals rely on delta + CVD only.
+        _ft_needs_ca = entry_path == "FAST_TRACK" and _peer_moving_same
+        _confirmed_needs_ca = entry_path == "CONFIRMED" and _peer_moving_same
+        if (_ft_needs_ca or _confirmed_needs_ca) and _cross_asset_agree == 0:
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=ca_not_aligned "
+                f"momentum={momentum:+.4%} cross_asset=0 validator={_validator} "
+                f"peer_same_dir={_peer_moving_same} path={entry_path}"
+            )
+            return False
+        # ─────────────────────────────────────────────────────────────────────
 
         # ── Shadow ML scoring ─────────────────────────────────────────────────
-        # Score every signal that passes all rule-based filters.
-        # Phase 1: log only — does NOT affect trading decisions.
         _now = datetime.now()
         _ml_prob = get_ml_model().predict(
             entry_price=mid,
             momentum=momentum,
             ob_imbalance=imbalance,
             trend_slope=self._last_slope.get(asset),
-            trend_direction=self._trend_direction.get(asset),
+            trend_direction=_trend_label,
             consec_losses=_consec_losses,
             asset=asset,
             timeframe=timeframe,
             hour=_now.hour,
             dow=_now.weekday(),
+            momentum_delta=momentum_delta,
+            secs_since_trend_change=_secs_since_trend,
+            prev_trend_direction=_prev_trend,
+            entry_path=entry_path,
+            consec_wins=_consec_wins,
+            ob_at_queue_time=ob_at_queue_time,
+            cross_asset_agree=_cross_asset_agree,
+            asset_range_15m=_asset_range_15m,
+            cvd_at_entry=_cvd,
+            window_slug=slug,
         )
         if _ml_prob is not None:
             logger.info(
                 f"MLShadow [{asset}/{timeframe}]: p_win={_ml_prob:.3f} "
-                f"mid={mid:.3f} mom={momentum:+.4%} ob={imbalance:+.3f if imbalance is not None else 'N/A'} "
-                f"trend={self._trend_direction.get(asset)} consec={_consec_losses}"
+                f"mid={mid:.3f} mom={momentum:+.4%} ob={f'{imbalance:+.3f}' if imbalance is not None else 'N/A'} "
+                f"cvd={f'{_cvd:+.3f}' if _cvd is not None else 'N/A'} "
+                f"trend={_trend_label} cross={_cross_asset_agree} path={entry_path}"
             )
         # ─────────────────────────────────────────────────────────────────────
 
@@ -698,11 +942,22 @@ class LatencyArb(BaseStrategy):
             window_slug=slug,
             asset=asset,
             ob_imbalance=imbalance,
+            cvd_at_entry=_cvd,
             trend_slope=self._last_slope.get(asset),
-            trend_direction=self._trend_direction.get(asset),
+            trend_direction=_trend_label,
             consec_losses=_consec_losses,
             ml_win_prob=_ml_prob,
+            momentum_delta=momentum_delta,
+            secs_since_trend_change=_secs_since_trend,
+            prev_trend_direction=_prev_trend,
+            entry_path=entry_path,
+            consec_wins=_consec_wins,
+            ob_at_queue_time=ob_at_queue_time,
+            cross_asset_agree=_cross_asset_agree,
+            asset_range_15m=_asset_range_15m,
         )
+
+        return True
 
     def _cleanup_15m_entered_slugs(self, asset: str) -> None:
         """Discard the previous 15m window's slug from _entered_15m_slugs when window rolls over."""
@@ -717,6 +972,60 @@ class LatencyArb(BaseStrategy):
                 self._entered_15m_slugs.discard(old_slug)
             self._last_15m_slug[key] = current_slug
 
+    async def _resolution_arb_check(
+        self,
+        asset: str,
+        can_trade: bool,
+        branch_open_count: dict,
+        total_open_count: int,
+    ) -> None:
+        """
+        Near-resolution arb: when a 15m window has < LAB_RESOLUTION_SECS_REMAINING left
+        AND Binance has clearly moved since window open, buy the winning token if it's
+        still not fully priced by Polymarket.
+        """
+        if not settings.LAB_RESOLUTION_ARB_ENABLED:
+            return
+        if not can_trade:
+            return
+
+        market_15m = self._get_market_if_fresh(f"{asset}_15m")
+        if market_15m is None:
+            return
+
+        slug = market_15m["slug"]
+        if slug in self._entered_15m_slugs:
+            return
+
+        window_secs = 900
+        ts = (int(time.time()) // window_secs) * window_secs
+        seconds_remaining = ts + window_secs - time.time()
+
+        if seconds_remaining > settings.LAB_RESOLUTION_SECS_REMAINING:
+            return
+        if seconds_remaining < 30:
+            return
+
+        open_snap = self._window_open_snapshots.get(slug)
+        if not open_snap or not open_snap.get("binance_price", 0):
+            return
+
+        symbol = f"{asset}/USDT"
+        current_price = self._exchange_feed.get_price(symbol)
+        if not current_price or current_price <= 0:
+            return
+
+        net_move = (current_price - open_snap["binance_price"]) / open_snap["binance_price"]
+        if abs(net_move) < settings.LAB_RESOLUTION_MIN_BINANCE_MOVE:
+            return
+
+        await self._trade_updown(
+            market_15m, asset,
+            momentum=net_move,
+            entry_path="RESOLUTION_ARB",
+        )
+        self._entered_15m_slugs.add(slug)
+
     async def _queue_15m_pending(
         self,
         asset: str,
@@ -727,6 +1036,7 @@ class LatencyArb(BaseStrategy):
         branch_open_count: int = 0,
         total_open_count: int = 0,
         cooldown_state: str = "inactive",
+        momentum_delta: float | None = None,
     ) -> None:
         """Queue, strengthen, or fast-track a 15m signal."""
         symbol = f"{asset}/USDT"
@@ -740,18 +1050,7 @@ class LatencyArb(BaseStrategy):
         window_secs = 900
         ts = (int(time.time()) // window_secs) * window_secs
         seconds_remaining = ts + window_secs - time.time()
-        if seconds_remaining < 90:
-            return
-
-        if self._is_15m_quiet_hours():
-            self._log_rejection(
-                asset, "15m",
-                "quiet_hours",
-                momentum=momentum,
-                threshold=required_momentum,
-                cooldown_state=cooldown_state,
-                branch_open_count=branch_open_count,
-            )
+        if seconds_remaining < 240:
             return
 
         if direction is None:
@@ -765,25 +1064,14 @@ class LatencyArb(BaseStrategy):
             )
             return
 
-        # Pre-check mid-price before queuing
-        _pre_token = updown["up_token_id"] if direction == "UP" else updown["down_token_id"]
-        try:
-            _pre_mid = await asyncio.get_running_loop().run_in_executor(
-                None, self._client.get_midpoint, _pre_token
-            )
-        except Exception:
-            _pre_mid = 0.5
-        _15m_min = settings.ETH_15M_MID_PRICE_MIN if asset == "ETH" else settings.LAB_15M_MID_PRICE_MIN
-        _15m_max = settings.ETH_15M_MID_PRICE_MAX if asset == "ETH" else settings.LAB_15M_MID_PRICE_MAX
-        if _pre_mid < _15m_min or _pre_mid > _15m_max:
-            _now = time.time()
-            if _now - self._last_mid_discard_ts.get(slug, 0) >= 3.0:
-                self._last_mid_discard_ts[slug] = _now
-                logger.debug(
-                    f"LatencyArb: 15m SKIPPED (pre-queue) [{asset}] — mid-price {_pre_mid:.3f} already outside "
-                    f"edge window [{_15m_min:.3f}, {_15m_max:.3f}]"
-                )
-            return
+        # Capture Binance price the first time this slug is seen (both FAST-TRACK and QUEUED)
+        if slug not in self._window_open_snapshots:
+            _snap_price = self._exchange_feed.get_price(symbol)
+            if _snap_price and _snap_price > 0:
+                self._window_open_snapshots[slug] = {
+                    "binance_price": _snap_price,
+                    "ts": time.time(),
+                }
 
         fasttrack_threshold = required_momentum * settings.LAB_15M_FASTTRACK_MULTIPLIER
 
@@ -799,18 +1087,21 @@ class LatencyArb(BaseStrategy):
                 )
                 return
             multiplier = settings.LAB_15M_FASTTRACK_MULTIPLIER
+            _15m_min, _15m_max = self._mid_price_window(asset, "15m")
             _ft_token = updown["up_token_id"] if direction == "UP" else updown["down_token_id"]
-            try:
-                _ft_mid = await asyncio.get_running_loop().run_in_executor(
-                    None, self._client.get_midpoint, _ft_token
-                )
-            except Exception:
-                _ft_mid = 0.5
+            _ft_mid = self._pm_feed.get_best_ask(_ft_token)
+            if _ft_mid is None or not (0 < _ft_mid < 1):
+                try:
+                    _ft_mid = await asyncio.get_running_loop().run_in_executor(
+                        None, self._client.get_midpoint, _ft_token
+                    )
+                except Exception:
+                    _ft_mid = 0.5
             if _ft_mid < _15m_min or _ft_mid > _15m_max:
                 _now = time.time()
-                if _now - self._last_mid_discard_ts.get(slug, 0) >= 3.0:
+                if _now - self._last_mid_discard_ts.get(slug, 0) >= 30.0:
                     self._last_mid_discard_ts[slug] = _now
-                    logger.info(
+                    logger.debug(
                         f"LatencyArb: 15m DISCARDED [{asset}] — mid-price {_ft_mid:.3f} outside edge window "
                         f"[{_15m_min:.3f}, {_15m_max:.3f}]"
                     )
@@ -820,7 +1111,12 @@ class LatencyArb(BaseStrategy):
                 f"momentum={momentum:+.4%} (>= {multiplier}x threshold)"
             )
             self._cooldown["15m"][slug] = time.time()
-            await self._trade_updown(updown, asset, momentum)
+            await self._trade_updown(
+                updown, asset, momentum,
+                entry_path="FAST_TRACK",
+                ob_at_queue_time=self._exchange_feed.get_order_book_imbalance(symbol),
+                momentum_delta=momentum_delta,
+            )
             self._entered_15m_slugs.add(slug)
             return
 
@@ -855,6 +1151,7 @@ class LatencyArb(BaseStrategy):
             "window_slug": slug,
             "asset": asset,
             "ob_at_queue": self._exchange_feed.get_order_book_imbalance(symbol),
+            "momentum_delta": momentum_delta,
         }
         self._last_15m_direction[asset] = direction
         self._last_15m_direction_ts[asset] = time.time()
@@ -875,9 +1172,6 @@ class LatencyArb(BaseStrategy):
     ) -> None:
         """Confirm or discard pending 15m entries for this asset on every tick."""
         if not self._pending_15m:
-            return
-
-        if self._is_15m_quiet_hours():
             return
 
         symbol = f"{asset}/USDT"
@@ -972,7 +1266,7 @@ class LatencyArb(BaseStrategy):
             window_secs = 900
             ts = (int(now) // window_secs) * window_secs
             seconds_remaining = ts + window_secs - now
-            if seconds_remaining < 90:
+            if seconds_remaining < 240:
                 logger.info(
                     f"LatencyArb: 15m pending discarded [{asset}] — only {seconds_remaining:.0f}s remaining in window"
                 )
@@ -990,23 +1284,24 @@ class LatencyArb(BaseStrategy):
                 )
                 continue
 
-            # Final mid-price check
+            # Final mid-price check (use PM feed ask if available)
             if market_15m is not None:
                 _dir = pending["direction"]
                 _tok = market_15m["up_token_id"] if _dir == "UP" else market_15m["down_token_id"]
-                try:
-                    _mid = await asyncio.get_running_loop().run_in_executor(
-                        None, self._client.get_midpoint, _tok
-                    )
-                except Exception:
-                    _mid = 0.5
-                _15m_min = settings.ETH_15M_MID_PRICE_MIN if asset == "ETH" else settings.LAB_15M_MID_PRICE_MIN
-                _15m_max = settings.ETH_15M_MID_PRICE_MAX if asset == "ETH" else settings.LAB_15M_MID_PRICE_MAX
+                _mid = self._pm_feed.get_best_ask(_tok)
+                if _mid is None or not (0 < _mid < 1):
+                    try:
+                        _mid = await asyncio.get_running_loop().run_in_executor(
+                            None, self._client.get_midpoint, _tok
+                        )
+                    except Exception:
+                        _mid = 0.5
+                _15m_min, _15m_max = self._mid_price_window(asset, "15m")
                 if _mid < _15m_min or _mid > _15m_max:
                     _now = time.time()
-                    if _now - self._last_mid_discard_ts.get(slug, 0) >= 3.0:
+                    if _now - self._last_mid_discard_ts.get(slug, 0) >= 30.0:
                         self._last_mid_discard_ts[slug] = _now
-                        logger.info(
+                        logger.debug(
                             f"LatencyArb: 15m DISCARDED [{asset}] — mid-price {_mid:.3f} outside edge window "
                             f"[{_15m_min:.3f}, {_15m_max:.3f}]"
                         )
@@ -1019,7 +1314,12 @@ class LatencyArb(BaseStrategy):
             )
             if market_15m is not None:
                 self._cooldown["15m"][slug] = time.time()
-                await self._trade_updown(market_15m, asset, momentum)
+                await self._trade_updown(
+                    market_15m, asset, momentum,
+                    entry_path="CONFIRMED",
+                    ob_at_queue_time=pending.get("ob_at_queue"),
+                    momentum_delta=pending.get("momentum_delta"),
+                )
                 self._entered_15m_slugs.add(slug)
             to_remove.append(slug)
 
@@ -1053,10 +1353,11 @@ class LatencyArb(BaseStrategy):
         slope_pct = (slope * n) / y_mean * 100 if y_mean else 0.0
         self._last_slope[asset] = slope_pct
 
-        if slope_pct > self._trend_slope_threshold_pct:
+        _slope_threshold = self._trend_slope_threshold_for_asset(asset)
+        if slope_pct > _slope_threshold:
             self._trend_direction[asset] = "UP"
             new_trend = "UP"
-        elif slope_pct < -self._trend_slope_threshold_pct:
+        elif slope_pct < -_slope_threshold:
             self._trend_direction[asset] = "DOWN"
             new_trend = "DOWN"
         else:
@@ -1069,38 +1370,9 @@ class LatencyArb(BaseStrategy):
                 f"Trend state changed [{asset}]: {self._last_logged_trend[asset]} → {new_trend} "
                 f"(slope_pct={slope_pct:.4f}% range={price_range:.2f} n_ticks={n})"
             )
+            self._prev_trend_direction[asset] = self._last_logged_trend[asset]
+            self._trend_change_ts[asset] = time.time()
             self._last_logged_trend[asset] = new_trend
-
-        # Whipsaw guard: record when direction genuinely reverses (UP↔DOWN, ignoring FLAT)
-        if new_trend in ("UP", "DOWN"):
-            prev_dir = self._last_directional_trend[asset]
-            if prev_dir is not None and prev_dir != new_trend:
-                self._trend_flip_ts[asset].append(time.time())
-                logger.info(
-                    f"Whipsaw guard [{asset}]: direction flip {prev_dir}→{new_trend} recorded "
-                    f"(total flips in last {self.WHIPSAW_WINDOW_SECS//60}min: "
-                    f"{self._count_recent_flips(asset)})"
-                )
-            self._last_directional_trend[asset] = new_trend
-        # Prune stale flip timestamps
-        cutoff = time.time() - self.WHIPSAW_WINDOW_SECS
-        while self._trend_flip_ts[asset] and self._trend_flip_ts[asset][0] < cutoff:
-            self._trend_flip_ts[asset].popleft()
-
-    def _count_recent_flips(self, asset: str) -> int:
-        """Count UP↔DOWN direction reversals in the last WHIPSAW_WINDOW_SECS."""
-        cutoff = time.time() - self.WHIPSAW_WINDOW_SECS
-        return sum(1 for ts in self._trend_flip_ts[asset] if ts >= cutoff)
-
-    def _count_recent_15m_flips(self, asset: str) -> int:
-        """Count 15m trade direction alternations (UP↔DOWN) in the last FIFTEEN_M_FLIP_WINDOW_SECS."""
-        cutoff = time.time() - self.FIFTEEN_M_FLIP_WINDOW_SECS
-        return sum(1 for ts in self._15m_trade_flip_ts[asset] if ts >= cutoff)
-
-    def _is_15m_quiet_hours(self) -> bool:
-        """Return True during 22:00-07:00 local time — 15m trades are blocked."""
-        h = datetime.now().hour
-        return h >= 22 or h < 7
 
     def _is_flat_trend(self, asset: str) -> bool:
         return self._trend_direction[asset] is None
@@ -1114,12 +1386,39 @@ class LatencyArb(BaseStrategy):
     def _15m_required_momentum(self, asset: str) -> float:
         return self._momentum_threshold_for_current_trend(asset) * self.FIFTEEN_MIN_CONFIRMATION_MULTIPLIER
 
-    def _get_ob_floor(self, asset: str = "BTC") -> float:
-        evening = datetime.now().hour >= settings.EVENING_HOURS_START
-        base_floor = settings.EVENING_OB_MIN_IMBALANCE if evening else settings.OB_MIN_IMBALANCE
-        if asset == "ETH":
-            return max(base_floor, settings.ETH_OB_MIN_IMBALANCE)
-        return base_floor
+    def _get_ob_floor(self, asset: str = "SOL") -> float:
+        """Minimum absolute OB imbalance required to enter, per asset."""
+        return {
+            "SOL": settings.SOL_OB_MIN_IMBALANCE,
+            "XRP": settings.XRP_OB_MIN_IMBALANCE,
+        }.get(asset, settings.OB_MIN_IMBALANCE)
+
+    def _ob_strong_size_mult(self, asset: str) -> float:
+        """Position size multiplier when OB imbalance is in the STRONG tier."""
+        return {
+            "SOL": settings.SOL_OB_SIZE_STRONG,
+            "XRP": settings.XRP_OB_SIZE_STRONG,
+        }.get(asset, settings.LAB_OB_SIZE_STRONG)
+
+    def _mid_price_window(self, asset: str, timeframe: str) -> tuple[float, float]:
+        """Returns (min, max) mid-price entry window for the given asset and timeframe."""
+        if timeframe == "5m":
+            return {
+                "SOL": (settings.SOL_5M_MID_PRICE_MIN, settings.SOL_5M_MID_PRICE_MAX),
+                "XRP": (settings.XRP_5M_MID_PRICE_MIN, settings.XRP_5M_MID_PRICE_MAX),
+            }.get(asset, (settings.LAB_5M_MID_PRICE_MIN, settings.LAB_5M_MID_PRICE_MAX))
+        return {
+            "SOL": (settings.SOL_15M_MID_PRICE_MIN, settings.SOL_15M_MID_PRICE_MAX),
+            "XRP": (settings.XRP_15M_MID_PRICE_MIN, settings.XRP_15M_MID_PRICE_MAX),
+        }.get(asset, (settings.LAB_15M_MID_PRICE_MIN, settings.LAB_15M_MID_PRICE_MAX))
+
+    def _trend_slope_threshold_for_asset(self, asset: str) -> float:
+        """Per-asset trend slope threshold (scaled to each asset's volatility)."""
+        raw = {
+            "SOL": settings.SOL_TREND_FILTER_MIN_SLOPE,
+            "XRP": settings.XRP_TREND_FILTER_MIN_SLOPE,
+        }.get(asset, settings.TREND_FILTER_MIN_SLOPE)
+        return self._normalize_trend_slope_threshold_pct(raw)
 
     def _execute_signal(
         self,
@@ -1133,12 +1432,21 @@ class LatencyArb(BaseStrategy):
         symbol: str,
         timeframe: str,
         window_slug: str,
-        asset: str = "BTC",
+        asset: str = "SOL",
         ob_imbalance: float | None = None,
+        cvd_at_entry: float | None = None,
         trend_slope: float | None = None,
         trend_direction: str | None = None,
         consec_losses: int | None = None,
         ml_win_prob: float | None = None,
+        momentum_delta: float | None = None,
+        secs_since_trend_change: float | None = None,
+        prev_trend_direction: str | None = None,
+        entry_path: str | None = None,
+        consec_wins: int | None = None,
+        ob_at_queue_time: float | None = None,
+        cross_asset_agree: int | None = None,
+        asset_range_15m: float | None = None,
     ) -> None:
         try:
             result = self._orders.place_market_order(
@@ -1152,21 +1460,37 @@ class LatencyArb(BaseStrategy):
                 asset=asset,
                 momentum_at_entry=momentum,
                 ob_imbalance_at_entry=ob_imbalance,
+                cvd_at_entry=cvd_at_entry,
                 trend_slope_at_entry=trend_slope,
                 trend_direction_at_entry=trend_direction,
                 consec_losses_at_entry=consec_losses,
                 timeframe=timeframe,
                 ml_win_prob=ml_win_prob,
+                momentum_delta=momentum_delta,
+                secs_since_trend_change=secs_since_trend_change,
+                prev_trend_direction=prev_trend_direction,
+                entry_path=entry_path,
+                consec_wins=consec_wins,
+                ob_at_queue_time=ob_at_queue_time,
+                cross_asset_agree=cross_asset_agree,
+                asset_range_15m=asset_range_15m,
             )
             if result:
+                # Use fee-adjusted position sizing so heartbeat PnL is accurate.
+                # Polymarket fee formula: fee = size × feeRate × p × (1-p)
+                # At p=0.455 with feeRate=0.10: ~2.5% of collateral (not flat 10%)
+                _fee_rate = settings.TAKER_FEE_RATE
+                _fee_usdc = size_usdc * _fee_rate * price * (1 - price) if price > 0 else 0.0
+                _shares = ((size_usdc - _fee_usdc) / price) if price > 0 else 0
+                _eff_entry = (size_usdc / _shares) if _shares > 0 else price
                 self._portfolio.add_position(
                     market_id=market_id,
                     token_id=token_id,
                     question=question,
                     strategy=self.name,
                     side=side,
-                    size=size_usdc / price if price else 0,
-                    entry_price=price,
+                    size=_shares,
+                    entry_price=_eff_entry,
                     metadata_json=json.dumps({
                         "timeframe": timeframe,
                         "window_slug": window_slug,
@@ -1175,65 +1499,89 @@ class LatencyArb(BaseStrategy):
                 )
                 logger.info(
                     f"LatencyArb: {side} {size_usdc:.2f} USDC @ {price:.3f} "
+                    f"(eff={_eff_entry:.4f} after {_fee_rate:.1%} fee) "
                     f"on {question[:40]}… {symbol} momentum={momentum:.4f}"
                 )
+                asyncio.ensure_future(get_alerter().trade_opened(
+                    asset=asset,
+                    direction="UP" if momentum > 0 else "DOWN",
+                    timeframe=timeframe,
+                    entry_path=entry_path or "UNKNOWN",
+                    size_usdc=size_usdc,
+                    mid=price,
+                    momentum=momentum,
+                    ml_prob=ml_win_prob,
+                    dry_run=settings.DRY_RUN,
+                ))
         except AssertionError as exc:
             logger.warning(f"LatencyArb order rejected: {exc}")
 
-    def on_stop_loss(self, timeframe: str | None = None, asset: str = "BTC") -> None:
-        """Apply a short mandatory cooldown immediately after a stop-loss exit.
-
-        This fires regardless of the consecutive-loss count — a single stop-loss
-        is enough to warrant a 120-second pause for that asset+timeframe.
-        The consecutive-loss counter is also incremented so 3 stop-losses in a
-        row still trigger the full 600s pause.
-        """
+    def on_stop_loss(self, timeframe: str | None = None, asset: str = "SOL") -> None:
+        """Increment consecutive loss counter; engage gate if threshold reached."""
         key = f"{asset}_{timeframe}" if timeframe in ("5m", "15m") else f"{asset}_5m"
         if key not in self._consecutive_losses:
-            key = "BTC_5m"
-        STOP_LOSS_COOLDOWN_SECS = 120
-        current_until = self._loss_cooldown_until.get(key, 0.0)
-        new_until = time.time() + STOP_LOSS_COOLDOWN_SECS
-        if new_until > current_until:
-            self._loss_cooldown_until[key] = new_until
+            key = "SOL_5m"
         self._consecutive_losses[key] += 1
+        self._consecutive_wins[key] = 0
+        losses = self._consecutive_losses[key]
         logger.warning(
-            f"LatencyArb: stop-loss exit on {key} — applying {STOP_LOSS_COOLDOWN_SECS}s cooldown "
-            f"(consecutive_losses={self._consecutive_losses[key]})"
+            f"LatencyArb: stop-loss exit on {key} "
+            f"(consecutive_losses={losses})"
         )
-        pause_after = settings.ETH_CONSEC_LOSS_PAUSE if asset == "ETH" else settings.LAB_CONSEC_LOSS_PAUSE
-        cooldown_secs = settings.ETH_LOSS_COOLDOWN_SECS if asset == "ETH" else 600
-        if self._consecutive_losses[key] >= pause_after:
-            self._loss_cooldown_until[key] = time.time() + cooldown_secs
-            self._consecutive_losses[key] = 0
+        if losses >= settings.LAB_CONSEC_LOSS_PAUSE:
+            self._consec_loss_pause_until[key] = time.time() + settings.LAB_CONSEC_LOSS_PAUSE_SECS
             logger.warning(
-                f"LatencyArb: {pause_after} consecutive stop-losses on {key} — extending pause to {cooldown_secs}s"
+                f"LatencyArb: CONSEC-LOSS GATE ON [{key}] — "
+                f"{settings.LAB_CONSEC_LOSS_PAUSE_SECS}s pause after {losses} consecutive losses"
             )
 
-    def on_win(self, timeframe: str | None = None, asset: str = "BTC") -> None:
-        key = f"{asset}_{timeframe}" if timeframe in ("5m", "15m") else f"{asset}_5m"
-        if key not in self._consecutive_losses:
-            key = f"BTC_5m"  # fallback for old trades without asset in metadata
-        self._consecutive_losses[key] = 0
-        self._loss_cooldown_until[key] = 0.0
-        logger.info(f"LatencyArb: win recorded for {key}, consecutive loss counter reset")
-
-    def on_loss(self, timeframe: str | None = None, asset: str = "BTC") -> None:
-        key = f"{asset}_{timeframe}" if timeframe in ("5m", "15m") else f"{asset}_5m"
-        if key not in self._consecutive_losses:
-            key = f"BTC_5m"
-        self._consecutive_losses[key] += 1
-        logger.info(
-            f"LatencyArb: loss recorded for {key}, consecutive losses = "
-            f"{self._consecutive_losses[key]}"
-        )
-        pause_after = settings.ETH_CONSEC_LOSS_PAUSE if asset == "ETH" else settings.LAB_CONSEC_LOSS_PAUSE
-        cooldown_secs = settings.ETH_LOSS_COOLDOWN_SECS if asset == "ETH" else 600
-        if self._consecutive_losses[key] >= pause_after:
-            self._loss_cooldown_until[key] = time.time() + cooldown_secs
-            self._consecutive_losses[key] = 0
+        # ── Rolling circuit breaker ───────────────────────────────────────────
+        _now = time.time()
+        self._recent_stop_loss_ts.append(_now)
+        self._recent_stop_loss_ts = [t for t in self._recent_stop_loss_ts if t > _now - 5400]
+        if len(self._recent_stop_loss_ts) >= 3 and _now >= self._circuit_breaker_until:
+            self._circuit_breaker_until = _now + 2700  # 45-min pause
             logger.warning(
-                f"LatencyArb: {pause_after} consecutive losses on {key} — pausing for {cooldown_secs}s"
+                f"LatencyArb: CIRCUIT BREAKER — "
+                f"{len(self._recent_stop_loss_ts)} stop-losses in 90min, "
+                f"all entries paused 45min"
+            )
+            asyncio.ensure_future(get_alerter().send(
+                "🚨 Circuit breaker: 3 stop-losses in 90min — entries paused 45min",
+                category="circuit_breaker",
+                cooldown=3600,
+            ))
+        # ─────────────────────────────────────────────────────────────────────
+
+    def on_win(self, timeframe: str | None = None, asset: str = "SOL") -> None:
+        key = f"{asset}_{timeframe}" if timeframe in ("5m", "15m") else f"{asset}_5m"
+        if key not in self._consecutive_losses:
+            key = "SOL_5m"
+        self._consecutive_losses[key] = 0
+        self._consecutive_wins[key] = self._consecutive_wins.get(key, 0) + 1
+        if time.time() < self._consec_loss_pause_until.get(key, 0):
+            self._consec_loss_pause_until[key] = 0.0
+            logger.info(f"LatencyArb: CONSEC-LOSS GATE CLEARED [{key}] — win recorded")
+        logger.info(
+            f"LatencyArb: win recorded for {key}, "
+            f"consecutive_wins={self._consecutive_wins[key]}"
+        )
+
+    def on_loss(self, timeframe: str | None = None, asset: str = "SOL") -> None:
+        key = f"{asset}_{timeframe}" if timeframe in ("5m", "15m") else f"{asset}_5m"
+        if key not in self._consecutive_losses:
+            key = "SOL_5m"
+        self._consecutive_losses[key] += 1
+        self._consecutive_wins[key] = 0
+        losses = self._consecutive_losses[key]
+        logger.info(
+            f"LatencyArb: loss recorded for {key}, consecutive losses = {losses}"
+        )
+        if losses >= settings.LAB_CONSEC_LOSS_PAUSE:
+            self._consec_loss_pause_until[key] = time.time() + settings.LAB_CONSEC_LOSS_PAUSE_SECS
+            logger.warning(
+                f"LatencyArb: CONSEC-LOSS GATE ON [{key}] — "
+                f"{settings.LAB_CONSEC_LOSS_PAUSE_SECS}s pause after {losses} consecutive losses"
             )
 
     # ── Utility helpers ───────────────────────────────────────────────────────
@@ -1381,25 +1729,11 @@ class LatencyArb(BaseStrategy):
         branch_open_count: dict[str, int],
         total_open_count: int,
     ) -> tuple[bool, str, str]:
-        now = time.time()
-        key = f"{asset}_{timeframe}"
-        cooldown_until = self._loss_cooldown_until.get(key, 0.0)
-        cooldown_state = "inactive"
-        if now < cooldown_until:
-            remaining = max(0.0, cooldown_until - now)
-            cooldown_state = f"{remaining:.0f}s"
-            if now - self._last_cooldown_log.get(key, 0.0) >= 60:
-                self._last_cooldown_log[key] = now
-                logger.debug(
-                    f"LatencyArb: loss cooldown active for {key}, "
-                    f"resuming in {remaining:.0f}s"
-                )
-            return False, "cooldown_active", cooldown_state
         if total_open_count >= self.MAX_CONCURRENT:
-            return False, "overall_capacity_full", cooldown_state
+            return False, "overall_capacity_full", "inactive"
         if branch_open_count.get(timeframe, 0) >= self._branch_limits[timeframe]:
-            return False, "branch_capacity_full", cooldown_state
-        return True, "ready", cooldown_state
+            return False, "branch_capacity_full", "inactive"
+        return True, "ready", "inactive"
 
     def _log_15m_confirmation_skip(self, asset: str, momentum: float, threshold: float) -> None:
         trend_state = self._trend_state_label(asset)
@@ -1469,7 +1803,7 @@ class LatencyArb(BaseStrategy):
         # Noisy background reasons stay at DEBUG — they fire hundreds of times per hour
         # and carry no actionable signal. Interesting reasons (OB mismatch, trend block,
         # cooldown, warmup) stay at INFO so they're visible after a CONFIRMED fires.
-        _noisy_reasons = {"weak_momentum", "quiet_hours", "no_signal", "warmup"}
+        _noisy_reasons = {"weak_momentum", "quiet_hours", "no_signal", "warmup", "price_skip_active"}
         _log = logger.debug if reason in _noisy_reasons else logger.info
 
         if state["signature"] != signature:

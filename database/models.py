@@ -23,16 +23,26 @@ class Trade(Base):
     status = Column(String, default="open")     # open / filled / cancelled
     exit_reason = Column(String, default="")
     dry_run = Column(Boolean, default=False)
-    asset = Column(String, default="BTC")       # BTC / ETH / etc.
+    asset = Column(String, default="SOL")       # BTC / ETH / etc.
     timestamp = Column(Integer, nullable=False)
     # ML feature columns — captured at entry time for future model training
     momentum_at_entry = Column(Float, default=None)
     ob_imbalance_at_entry = Column(Float, default=None)
+    cvd_at_entry = Column(Float, default=None)          # taker CVD ratio [-1,+1] at entry time
     trend_slope_at_entry = Column(Float, default=None)
     trend_direction_at_entry = Column(String, default=None)  # UP / DOWN / FLAT / WARMUP
     consec_losses_at_entry = Column(Integer, default=None)
     timeframe = Column(String, default=None)       # 5m / 15m
     ml_win_prob = Column(Float, default=None)      # shadow model prediction (0–1)
+    # Extended ML features — Phase 2
+    momentum_delta = Column(Float, default=None)           # current - prev tick momentum
+    secs_since_trend_change = Column(Float, default=None)  # seconds since last FLAT/UP/DOWN transition
+    prev_trend_direction = Column(String, default=None)    # trend state before current one
+    entry_path = Column(String, default=None)              # FAST_TRACK / CONFIRMED / 5M_DIRECT
+    consec_wins = Column(Integer, default=None)            # current winning streak
+    ob_at_queue_time = Column(Float, default=None)         # OB imbalance when 15m was queued
+    cross_asset_agree = Column(Integer, default=None)      # 1 if other asset momentum aligns with signal direction
+    asset_range_15m = Column(Float, default=None)          # normalized price range over last 15m (max-min)/avg
 
 
 class PnLSnapshot(Base):
@@ -114,5 +124,5 @@ class MarketCooldown(Base):
     __tablename__ = "market_cooldowns"
 
     market_id = Column(String, primary_key=True)
-    strategy = Column(String, default="ai_sentiment")
+    strategy = Column(String, default="latency_arb")
     last_traded_at = Column(Float, nullable=False)  # unix timestamp

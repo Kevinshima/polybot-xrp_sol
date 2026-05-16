@@ -1,17 +1,23 @@
 """
-Backfill ML feature columns for the 355 historical latency_arb trades.
+Backfill ML feature columns for historical latency_arb trades.
 
-Recovers 5 features from the log file and DB trade sequence:
-  - momentum_at_entry       : from "LatencyArb: BUY … momentum=X" log line
-  - ob_imbalance_at_entry   : from "LatencyArb OB sizing … imbalance=X" log line (fires ~33ms before BUY)
-  - trend_direction_at_entry: from nearest "LatencyArb tick: … trend=X" log line before trade
-  - trend_slope_at_entry    : from same tick line (slope_pct=X%)
-  - consec_losses_at_entry  : replayed from DB trade sequence (deterministic)
+Recovers features from the log file and DB trade sequence:
 
-Run once:
-    python3 scripts/backfill_ml_features.py
+  Original features (already backfilled on first run):
+  - momentum_at_entry        : from "LatencyArb: BUY … momentum=X"
+  - ob_imbalance_at_entry    : from "LatencyArb OB sizing … imbalance=X"
+  - trend_direction_at_entry : from nearest "LatencyArb tick: … trend=X"
+  - trend_slope_at_entry     : from same tick line
+  - consec_losses_at_entry   : replayed from DB trade sequence
 
-Prints a summary of what was recovered vs left NULL.
+  Extended features (added 2026-05-05):
+  - secs_remaining_in_window : derived from slug timestamp + trade timestamp
+  - entry_path               : FAST_TRACK / CONFIRMED / 5M_DIRECT from log
+  - consec_wins              : replayed from DB trade sequence
+
+Run:
+    python3 scripts/backfill_ml_features.py           # dry run — prints plan
+    python3 scripts/backfill_ml_features.py --apply   # writes to DB
 """
 from __future__ import annotations
 
@@ -27,59 +33,64 @@ from bisect import bisect_right
 LOG_FILE = Path(__file__).parent.parent / "logs" / "bot.log"
 DB_FILE  = Path(__file__).parent.parent / "data" / "polymarket.db"
 
-# How far before a BUY log to look for its paired OB sizing line (seconds)
-OB_WINDOW_SECS = 1.0
-# How far back to look for a tick log to recover trend state (seconds)
-TICK_WINDOW_SECS = 120.0
+OB_WINDOW_SECS   = 1.0    # seconds before BUY to look for OB sizing line
+TICK_WINDOW_SECS = 120.0  # seconds before BUY to look for tick line
+PATH_WINDOW_SECS = 3.0    # seconds before BUY to look for CONFIRMED/FAST-TRACK
 
 # ── Regex patterns ────────────────────────────────────────────────────────────
 
-_DT   = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.(\d+)"
+_DT = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.(\d+)"
 
 BUY_PAT = re.compile(
     _DT + r".*LatencyArb: BUY.*"
-    r"\[((?:btc|eth)-updown-(5m|15m)-\d+)\]"
+    r"\[((?:btc|eth)-updown-(5m|15m)-(\d+))\]"
     r"\s+momentum=([\-+\d.]+)"
 )
 OB_PAT = re.compile(
     _DT + r".*LatencyArb OB sizing.*?imbalance=([\-+\d.]+)"
 )
-# Two tick formats:
-#   old: "LatencyArb tick: BTC=… trend=FLAT slope_pct=+0.04%"
-#   new: "LatencyArb tick: ETH=… trend=UP   slope_pct=-0.12%"
 TICK_PAT = re.compile(
     _DT + r".*LatencyArb tick:\s*(BTC|ETH)=.*?\s+trend=(\w+)\s+slope_pct=([\-+\d.]+)%"
+)
+CONFIRMED_PAT = re.compile(
+    _DT + r".*15m CONFIRMED\s+\[(?:BTC|ETH)\]"
+)
+FASTTRACK_PAT = re.compile(
+    _DT + r".*15m FAST-TRACK entry\s+\[(?:BTC|ETH)\]"
 )
 
 
 def _ts(date_str: str, frac_str: str) -> float:
-    """Convert loguru datetime parts to unix timestamp."""
     return datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S").timestamp() + int(frac_str) / 1000
 
 
 # ── Step 1: Parse log file ────────────────────────────────────────────────────
 
-def parse_log(log_path: Path) -> tuple[list, list, dict]:
+def parse_log(log_path: Path) -> tuple[list, list, dict, list]:
     """
     Returns:
-        buy_events  : [(ts, momentum, asset, timeframe), ...]  sorted by ts
-        ob_events   : [(ts, imbalance), ...]                    sorted by ts
-        tick_events : {"BTC": [(ts, direction, slope), ...], "ETH": [...]}  sorted by ts
+        buy_events   : [(ts, momentum, asset, timeframe, slug, window_ts), ...]
+        ob_events    : [(ts, imbalance), ...]
+        tick_events  : {"SOL": [(ts, direction, slope), ...], "XRP": [...]}
+        path_events  : [(ts, path_str), ...]  — CONFIRMED or FAST_TRACK markers
     """
-    buy_events: list[tuple[float, float, str, str]] = []
-    ob_events:  list[tuple[float, float]] = []
-    tick_events: dict[str, list[tuple[float, str, float]]] = {"BTC": [], "ETH": []}
+    buy_events:  list = []
+    ob_events:   list = []
+    tick_events: dict = {"SOL": [], "XRP": []}
+    path_events: list = []
 
     print(f"Parsing {log_path} …", flush=True)
     with open(log_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             m = BUY_PAT.search(line)
             if m:
-                ts  = _ts(m.group(1), m.group(2))
-                asset = "ETH" if m.group(3).startswith("eth") else "BTC"
-                tf  = m.group(4)           # "5m" or "15m"
-                mom = float(m.group(5))
-                buy_events.append((ts, mom, asset, tf))
+                ts         = _ts(m.group(1), m.group(2))
+                slug       = m.group(3)                           # e.g. sol-updown-15m-1777900500
+                timeframe  = m.group(4)                           # "5m" or "15m"
+                window_ts  = int(m.group(5))                      # unix timestamp of window start
+                asset      = "XRP" if slug.startswith("xrp") else "SOL"
+                momentum   = float(m.group(6))
+                buy_events.append((ts, momentum, asset, timeframe, slug, window_ts))
                 continue
 
             m = OB_PAT.search(line)
@@ -91,63 +102,72 @@ def parse_log(log_path: Path) -> tuple[list, list, dict]:
 
             m = TICK_PAT.search(line)
             if m:
-                ts    = _ts(m.group(1), m.group(2))
-                asset = m.group(3)
+                ts        = _ts(m.group(1), m.group(2))
+                asset     = m.group(3)
                 direction = m.group(4)
-                slope = float(m.group(5))
+                slope     = float(m.group(5))
                 tick_events[asset].append((ts, direction, slope))
+                continue
+
+            m = CONFIRMED_PAT.search(line)
+            if m:
+                path_events.append((_ts(m.group(1), m.group(2)), "CONFIRMED"))
+                continue
+
+            m = FASTTRACK_PAT.search(line)
+            if m:
+                path_events.append((_ts(m.group(1), m.group(2)), "FAST_TRACK"))
 
     buy_events.sort(key=lambda x: x[0])
     ob_events.sort(key=lambda x: x[0])
+    path_events.sort(key=lambda x: x[0])
     for asset in tick_events:
         tick_events[asset].sort(key=lambda x: x[0])
 
-    print(f"  BUY entries:  {len(buy_events)}")
-    print(f"  OB entries:   {len(ob_events)}")
-    print(f"  Tick BTC:     {len(tick_events['BTC'])}")
-    print(f"  Tick ETH:     {len(tick_events['ETH'])}")
-    return buy_events, ob_events, tick_events
+    print(f"  BUY entries:      {len(buy_events)}")
+    print(f"  OB entries:       {len(ob_events)}")
+    print(f"  Tick BTC:         {len(tick_events['BTC'])}")
+    print(f"  Tick ETH:         {len(tick_events['ETH'])}")
+    print(f"  Path markers:     {len(path_events)}")
+    return buy_events, ob_events, tick_events, path_events
 
 
-# ── Step 2: Build per-trade feature lookup keyed by unix timestamp ─────────────
+# ── Step 2: Build per-trade feature lookup ────────────────────────────────────
 
 def build_feature_lookup(
     buy_events: list,
     ob_events: list,
     tick_events: dict,
+    path_events: list,
 ) -> dict[float, dict]:
-    """
-    For each BUY event, find its matching OB event (within OB_WINDOW_SECS before it)
-    and its most recent tick event (within TICK_WINDOW_SECS before it).
-    Returns {buy_ts: {momentum, ob_imbalance, trend_direction, trend_slope}}.
-    """
-    ob_ts_list = [ts for ts, _ in ob_events]
-
+    ob_ts_list   = [ts for ts, _ in ob_events]
+    path_ts_list = [ts for ts, _ in path_events]
     tick_ts: dict[str, list[float]] = {
         asset: [e[0] for e in evts] for asset, evts in tick_events.items()
     }
 
     lookup: dict[float, dict] = {}
 
-    for buy_ts, momentum, asset, timeframe in buy_events:
+    for buy_ts, momentum, asset, timeframe, slug, window_ts in buy_events:
         features: dict = {
-            "momentum": momentum,
-            "ob_imbalance": None,
-            "trend_direction": None,
-            "trend_slope": None,
-            "asset": asset,
-            "timeframe": timeframe,
+            "momentum":              momentum,
+            "ob_imbalance":          None,
+            "trend_direction":       None,
+            "trend_slope":           None,
+            "asset":                 asset,
+            "timeframe":             timeframe,
+            "entry_path":            "5M_DIRECT",   # default unless CONFIRMED/FAST_TRACK found
+            "secs_remaining":        None,
         }
 
-        # ── OB match: most recent OB line within OB_WINDOW_SECS before BUY ──
-        # bisect to find insertion point of buy_ts in ob_ts_list
+        # ── OB: most recent OB line within 1s before BUY ──────────────────────
         idx = bisect_right(ob_ts_list, buy_ts) - 1
         if idx >= 0:
             ob_ts_val, ob_imb = ob_events[idx]
             if 0 <= buy_ts - ob_ts_val <= OB_WINDOW_SECS:
                 features["ob_imbalance"] = ob_imb
 
-        # ── Tick match: most recent tick for this asset within TICK_WINDOW_SECS ──
+        # ── Tick: most recent tick for this asset within 120s before BUY ──────
         asset_ticks = tick_events[asset]
         asset_ts    = tick_ts[asset]
         idx2 = bisect_right(asset_ts, buy_ts) - 1
@@ -155,19 +175,34 @@ def build_feature_lookup(
             tick_ts_val, direction, slope = asset_ticks[idx2]
             if 0 <= buy_ts - tick_ts_val <= TICK_WINDOW_SECS:
                 features["trend_direction"] = direction
-                features["trend_slope"]     = slope / 100.0  # convert pct → ratio
+                features["trend_slope"]     = slope / 100.0
+
+        # ── entry_path: look for CONFIRMED or FAST_TRACK within 3s before BUY ─
+        idx3 = bisect_right(path_ts_list, buy_ts) - 1
+        if idx3 >= 0:
+            path_ts_val, path_str = path_events[idx3]
+            if 0 <= buy_ts - path_ts_val <= PATH_WINDOW_SECS:
+                features["entry_path"] = path_str
+
+        # ── secs_remaining_in_window: derived from slug ────────────────────────
+        window_secs = 900 if timeframe == "15m" else 300
+        remaining = (window_ts + window_secs) - buy_ts
+        features["secs_remaining"] = max(0.0, remaining)
 
         lookup[buy_ts] = features
 
     return lookup
 
 
-# ── Step 3: Replay DB for consec_losses ──────────────────────────────────────
+# ── Step 3: Replay DB for consec_losses + consec_wins ────────────────────────
 
-def compute_consec_losses(db_path: Path, feature_lookup: dict) -> dict[float, int]:
+def compute_consec_stats(
+    db_path: Path,
+    feature_lookup: dict,
+) -> tuple[dict[float, int], dict[float, int]]:
     """
-    Replay trades chronologically and return {trade_ts: consec_losses_at_entry}.
-    Uses the same logic as on_loss / on_win / on_stop_loss in latency_arb.py.
+    Replay trades chronologically.
+    Returns ({trade_ts: consec_losses_at_entry}, {trade_ts: consec_wins_at_entry}).
     """
     conn = sqlite3.connect(db_path)
     rows = conn.execute(
@@ -180,33 +215,34 @@ def compute_consec_losses(db_path: Path, feature_lookup: dict) -> dict[float, in
     ).fetchall()
     conn.close()
 
-    # We need the timeframe per trade — derive it from feature_lookup where available,
-    # otherwise fall back to inferring from pnl size (not reliable, so leave as "5m").
-    ts_to_tf: dict[float, str] = {}
-    for ts, features in feature_lookup.items():
-        ts_to_tf[ts] = features["timeframe"]
+    ts_to_tf: dict[float, str] = {
+        ts: feat["timeframe"] for ts, feat in feature_lookup.items()
+    }
 
-    consec: dict[str, int] = {}  # key = "{asset}_{timeframe}"
-    result: dict[float, int] = {}
+    consec_losses: dict[str, int] = {}
+    consec_wins:   dict[str, int] = {}
+    loss_result:   dict[float, int] = {}
+    win_result:    dict[float, int] = {}
 
     for db_ts, asset, pnl, exit_reason in rows:
-        asset = asset or "BTC"
-        tf    = ts_to_tf.get(float(db_ts), "5m")  # default 5m when unknown
-        key   = f"{asset}_{tf}"
+        asset  = asset or "SOL"
+        tf     = ts_to_tf.get(float(db_ts), "5m")
+        key    = f"{asset}_{tf}"
 
-        if key not in consec:
-            consec[key] = 0
+        consec_losses.setdefault(key, 0)
+        consec_wins.setdefault(key, 0)
 
-        result[float(db_ts)] = consec[key]  # record BEFORE updating
+        loss_result[float(db_ts)] = consec_losses[key]
+        win_result[float(db_ts)]  = consec_wins[key]
 
-        if pnl is not None:
-            if pnl > 0:
-                consec[key] = 0
-            elif pnl < 0:
-                consec[key] += 1
-            # pnl == 0 → no change (open or cancelled)
+        if pnl is not None and pnl > 0:
+            consec_losses[key] = 0
+            consec_wins[key]  += 1
+        elif pnl is not None and pnl < 0:
+            consec_losses[key] += 1
+            consec_wins[key]   = 0
 
-    return result
+    return loss_result, win_result
 
 
 # ── Step 4: Match log features to DB trades and UPDATE ───────────────────────
@@ -214,13 +250,10 @@ def compute_consec_losses(db_path: Path, feature_lookup: dict) -> dict[float, in
 def match_and_update(
     db_path: Path,
     feature_lookup: dict,
-    consec_lookup: dict,
+    consec_loss_lookup: dict,
+    consec_win_lookup: dict,
     dry_run: bool = False,
 ) -> None:
-    """
-    For each DB trade, find the closest log BUY entry within 2 seconds
-    and UPDATE the trade row with recovered features.
-    """
     conn = sqlite3.connect(db_path)
     trades = conn.execute(
         """
@@ -235,10 +268,7 @@ def match_and_update(
     buy_ts_list = sorted(feature_lookup.keys())
     MATCH_WINDOW = 2.0
 
-    updated = 0
-    no_log_match = 0
-    partial = 0
-
+    updated = no_log_match = partial = 0
     updates: list[tuple] = []
 
     for trade_id, db_ts, asset in trades:
@@ -248,19 +278,18 @@ def match_and_update(
         idx = bisect_right(buy_ts_list, db_ts_f + MATCH_WINDOW) - 1
         feat = None
         while idx >= 0:
-            candidate_ts = buy_ts_list[idx]
-            if abs(db_ts_f - candidate_ts) <= MATCH_WINDOW:
-                feat = feature_lookup[candidate_ts]
+            if abs(db_ts_f - buy_ts_list[idx]) <= MATCH_WINDOW:
+                feat = feature_lookup[buy_ts_list[idx]]
                 break
             idx -= 1
 
-        consec = consec_lookup.get(db_ts_f)
+        cl = consec_loss_lookup.get(db_ts_f)
+        cw = consec_win_lookup.get(db_ts_f)
 
         if feat is None:
             no_log_match += 1
-            # Still update consec_losses if we have it
-            if consec is not None:
-                updates.append((None, None, None, None, consec, None, trade_id))
+            if cl is not None or cw is not None:
+                updates.append((None, None, None, None, cl, None, None, None, cw, trade_id))
             continue
 
         if feat["ob_imbalance"] is None or feat["trend_direction"] is None:
@@ -271,21 +300,24 @@ def match_and_update(
             feat["ob_imbalance"],
             feat["trend_slope"],
             feat["trend_direction"],
-            consec,
+            cl,
             feat["timeframe"],
+            feat["entry_path"],
+            feat["secs_remaining"],
+            cw,
             trade_id,
         ))
         updated += 1
 
     print(f"\nMatch results:")
-    print(f"  Fully matched (log + consec): {updated}")
-    print(f"  Partially matched (log only, no OB or trend): {partial}")
-    print(f"  No log match (consec only):  {no_log_match}")
-    print(f"  Total UPDATE statements:     {len(updates)}")
+    print(f"  Fully matched:   {updated}")
+    print(f"  Partial match:   {partial}")
+    print(f"  No log match:    {no_log_match}")
+    print(f"  Total updates:   {len(updates)}")
 
     if dry_run:
-        print("\n[DRY RUN] — no DB changes written. Pass --apply to commit.")
-        print("Sample updates:")
+        print("\n[DRY RUN] — pass --apply to write to DB.")
+        print("Sample updates (first 5):")
         for u in updates[:5]:
             print(" ", u)
         conn.close()
@@ -300,7 +332,10 @@ def match_and_update(
             trend_slope_at_entry     = COALESCE(?, trend_slope_at_entry),
             trend_direction_at_entry = COALESCE(?, trend_direction_at_entry),
             consec_losses_at_entry   = COALESCE(?, consec_losses_at_entry),
-            timeframe                = COALESCE(?, timeframe)
+            timeframe                = COALESCE(?, timeframe),
+            entry_path               = COALESCE(?, entry_path),
+            secs_since_trend_change  = COALESCE(?, secs_since_trend_change),
+            consec_wins              = COALESCE(?, consec_wins)
         WHERE id = ?
         """,
         updates,
@@ -308,26 +343,28 @@ def match_and_update(
     conn.commit()
     print(f"\nCommitted {cur.rowcount} rows updated.")
 
-    # Verify
     row = conn.execute(
         """
         SELECT
             COUNT(*) as total,
-            SUM(CASE WHEN momentum_at_entry IS NOT NULL THEN 1 ELSE 0 END) as has_mom,
-            SUM(CASE WHEN ob_imbalance_at_entry IS NOT NULL THEN 1 ELSE 0 END) as has_ob,
-            SUM(CASE WHEN trend_direction_at_entry IS NOT NULL THEN 1 ELSE 0 END) as has_trend,
-            SUM(CASE WHEN consec_losses_at_entry IS NOT NULL THEN 1 ELSE 0 END) as has_consec,
-            SUM(CASE WHEN timeframe IS NOT NULL THEN 1 ELSE 0 END) as has_tf
+            SUM(CASE WHEN momentum_at_entry IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN ob_imbalance_at_entry IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN trend_direction_at_entry IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN consec_losses_at_entry IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN timeframe IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN entry_path IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN secs_since_trend_change IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN consec_wins IS NOT NULL THEN 1 ELSE 0 END)
         FROM trades
         WHERE strategy = 'latency_arb' AND status IN ('filled', 'closed')
         """
     ).fetchone()
-    print(f"\nVerification (of {row[0]} closed/filled trades):")
-    print(f"  momentum:        {row[1]} / {row[0]}")
-    print(f"  ob_imbalance:    {row[2]} / {row[0]}")
-    print(f"  trend_direction: {row[3]} / {row[0]}")
-    print(f"  consec_losses:   {row[4]} / {row[0]}")
-    print(f"  timeframe:       {row[5]} / {row[0]}")
+    total = row[0]
+    labels = ["momentum", "ob_imbalance", "trend_direction", "consec_losses",
+              "timeframe", "entry_path", "secs_remaining", "consec_wins"]
+    print(f"\nVerification ({total} closed trades):")
+    for i, label in enumerate(labels):
+        print(f"  {label:30s}: {row[i+1]} / {total}")
 
     conn.close()
 
@@ -337,20 +374,24 @@ def match_and_update(
 def main():
     apply = "--apply" in sys.argv
     if not apply:
-        print("Running in DRY RUN mode. Pass --apply to write to DB.\n")
+        print("DRY RUN — pass --apply to write to DB.\n")
 
     if not LOG_FILE.exists():
         print(f"ERROR: log file not found at {LOG_FILE}")
         sys.exit(1)
 
-    buy_events, ob_events, tick_events = parse_log(LOG_FILE)
-    feature_lookup = build_feature_lookup(buy_events, ob_events, tick_events)
-    consec_lookup  = compute_consec_losses(DB_FILE, feature_lookup)
+    buy_events, ob_events, tick_events, path_events = parse_log(LOG_FILE)
+    feature_lookup = build_feature_lookup(buy_events, ob_events, tick_events, path_events)
+    consec_loss_lookup, consec_win_lookup = compute_consec_stats(DB_FILE, feature_lookup)
 
-    print(f"\nFeature lookup built: {len(feature_lookup)} entries")
-    print(f"Consec lookup built:  {len(consec_lookup)} entries")
+    print(f"\nFeature lookup: {len(feature_lookup)} entries")
+    print(f"Consec lookup:  {len(consec_loss_lookup)} entries")
 
-    match_and_update(DB_FILE, feature_lookup, consec_lookup, dry_run=not apply)
+    match_and_update(
+        DB_FILE, feature_lookup,
+        consec_loss_lookup, consec_win_lookup,
+        dry_run=not apply,
+    )
 
 
 if __name__ == "__main__":

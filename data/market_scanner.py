@@ -93,29 +93,18 @@ class MarketScanner:
         return candidates
 
     # Asset keyword patterns for get_crypto_price_candidates().
-    # Uses multi-word phrases to avoid 'eth'→'Netherlands', 'sol'→'resolution' false positives.
-    # Add 'updown-15m' / 'up-or-down-15' here when Polymarket lists those slugs.
+    # Uses multi-word phrases to avoid 'sol'→'resolution', 'xrp'→'express' false positives.
     _ASSET_PATTERNS: list[tuple[str, list[str]]] = [
-        ("BTC", ["btc", "bitcoin"]),
-        ("ETH", ["ethereum", "eth price", "eth above", "eth below", "eth hits", "will eth"]),
-        ("SOL", ["solana", "sol price", "sol above", "sol below", "sol hits", "will sol"]),
+        ("SOL", ["solana", "sol price", "sol above", "sol below", "sol hits", "will sol", "sol-updown"]),
+        ("XRP", ["xrp", "ripple", "xrp price", "xrp above", "xrp below", "xrp hits", "will xrp", "xrp-updown"]),
     ]
 
     async def get_crypto_price_candidates(
         self, min_volume: float = 5_000
     ) -> dict[str, list[dict]]:
-        """
-        Returns {asset: [markets]} for BTC/ETH/SOL price outcome markets
-        with 24h volume >= min_volume.
-
-        NOTE: The target slugs 'updown-15m' / 'up-or-down-15' do not yet exist
-        on Polymarket. This method currently matches the available BTC/ETH/SOL
-        price milestone markets (e.g. 'Will Bitcoin hit $150k by ...'). When
-        Polymarket adds 15-min updown markets, add their slug patterns to
-        _ASSET_PATTERNS above and they will be picked up automatically.
-        """
+        """Returns {asset: [markets]} for SOL/XRP price outcome markets with 24h volume >= min_volume."""
         all_markets = await self.get_active_markets()
-        result: dict[str, list[dict]] = {"BTC": [], "ETH": [], "SOL": []}
+        result: dict[str, list[dict]] = {"SOL": [], "XRP": []}
 
         for m in all_markets:
             if not m.get("acceptingOrders", False):
@@ -139,7 +128,7 @@ class MarketScanner:
         total = sum(len(v) for v in result.values())
         logger.info(
             f"Crypto price candidates: {total} markets "
-            f"(BTC={len(result['BTC'])}, ETH={len(result['ETH'])}, SOL={len(result['SOL'])})"
+            f"(SOL={len(result['SOL'])}, XRP={len(result['XRP'])})"
         )
         return result
 
@@ -179,6 +168,14 @@ class MarketScanner:
                         params={"slug": slug},
                         timeout=aiohttp.ClientTimeout(total=10),
                     ) as resp:
+                        if resp.status == 425:
+                            # Matching engine restarting (Tuesdays ~7AM ET) — return
+                            # None without raising so the circuit breaker stays closed.
+                            logger.info(
+                                f"MarketScanner: HTTP 425 for {slug} — "
+                                "matching engine restarting, will retry next cycle"
+                            )
+                            return None
                         if resp.status != 200:
                             raise ValueError(f"HTTP {resp.status}")
                         return await resp.json()
@@ -225,8 +222,8 @@ class MarketScanner:
         return None
 
     async def get_updown_market(self) -> Optional[dict]:
-        """Fetch the current BTC 5-minute up-down market. Delegates to get_updown_market_for()."""
-        return await self.get_updown_market_for("btc", 5)
+        """Fetch the current SOL 5-minute up-down market. Delegates to get_updown_market_for()."""
+        return await self.get_updown_market_for("sol", 5)
 
     async def find_markets_for_keyword(self, keyword: str, max_results: int = 5) -> list[dict]:
         """Fuzzy-match markets by keyword in the question."""
@@ -267,6 +264,12 @@ class MarketScanner:
                     params=params,
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
+                    if resp.status == 425:
+                        logger.info(
+                            "MarketScanner: HTTP 425 — matching engine restarting, "
+                            "using cached markets"
+                        )
+                        return None
                     if resp.status != 200:
                         raise ValueError(f"Gamma API returned {resp.status}")
                     data = await resp.json()

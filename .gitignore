@@ -19,4 +19,8 @@ redis-data/
 runs/
 data/bot.db
 data/polymarket.db
+data/polymarket.db.bak
+data/ml_model_btceth.pkl.bak
 database/polymarket.db
+*.bak
+=0.*

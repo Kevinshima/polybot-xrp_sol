@@ -30,9 +30,23 @@ GATE_ENABLED       = False
 KELLY_SIZING       = False
 ML_GATE_THRESHOLD  = 0.52     # skip if predicted P(win) < this
 
-TREND_MAP     = {"FLAT": 0, "UP": 1, "DOWN": 2, "WARMUP": 3}
-ASSET_MAP     = {"BTC": 0, "ETH": 1}
-TIMEFRAME_MAP = {"5m": 0, "15m": 1}
+TREND_MAP      = {"FLAT": 0, "UP": 1, "DOWN": 2, "WARMUP": 3}
+ASSET_MAP      = {"SOL": 0, "XRP": 1}
+# CVD added as feature: taker volume delta [-1,+1] at entry (trade-based OFI)
+TIMEFRAME_MAP  = {"5m": 0, "15m": 1}
+ENTRY_PATH_MAP = {"5M_DIRECT": 0, "CONFIRMED": 1, "FAST_TRACK": 2}
+
+
+def _secs_remaining(window_slug: str | None, timeframe: str | None) -> float:
+    """Compute seconds remaining in window at this moment from the slug timestamp."""
+    if not window_slug:
+        return 0.0
+    try:
+        window_ts = int(window_slug.split("-")[-1])
+        window_secs = 900 if timeframe == "15m" else 300
+        return max(0.0, (window_ts + window_secs) - time.time())
+    except Exception:
+        return 0.0
 
 
 class MLModel:
@@ -64,10 +78,21 @@ class MLModel:
         timeframe: str,
         hour: int,
         dow: int,
+        momentum_delta: float | None = None,
+        secs_since_trend_change: float | None = None,
+        prev_trend_direction: str | None = None,
+        entry_path: str | None = None,
+        consec_wins: int | None = None,
+        ob_at_queue_time: float | None = None,
+        cross_asset_agree: int | None = None,
+        asset_range_15m: float | None = None,
+        cvd_at_entry: float | None = None,
+        window_slug: str | None = None,
     ) -> float | None:
         """
         Return predicted P(win) in [0, 1], or None if model unavailable.
         Always returns a value — never raises.
+        New features are passed through; old saved models ignore unknown columns.
         """
         self._maybe_reload()
         if self._model is None:
@@ -75,18 +100,34 @@ class MLModel:
 
         try:
             import pandas as pd
-            row = pd.DataFrame([{
-                "entry_price":       float(entry_price),
-                "abs_momentum":      abs(float(momentum)),
-                "ob_imbalance":      float(ob_imbalance or 0),
-                "trend_slope":       float(trend_slope or 0),
-                "trend_encoded":     float(TREND_MAP.get(trend_direction, 0)),
-                "hour_of_day":       float(hour),
-                "day_of_week":       float(dow),
-                "consec_losses":     float(consec_losses),
-                "asset_encoded":     float(ASSET_MAP.get(asset, 0)),
-                "timeframe_encoded": float(TIMEFRAME_MAP.get(timeframe, 0)),
-            }], columns=self._features)
+            all_data = {
+                "entry_price":              float(entry_price),
+                "abs_momentum":             abs(float(momentum)),
+                "ob_imbalance":             float(ob_imbalance or 0),
+                "trend_slope":              float(trend_slope or 0),
+                "trend_encoded":            float(TREND_MAP.get(trend_direction, 0)),
+                "hour_of_day":              float(hour),
+                "day_of_week":              float(dow),
+                "consec_losses":            float(consec_losses),
+                "asset_encoded":            float(ASSET_MAP.get(asset, 0)),
+                "timeframe_encoded":        float(TIMEFRAME_MAP.get(timeframe, 0)),
+                "secs_remaining_in_window": float(_secs_remaining(window_slug, timeframe)),
+                "momentum_delta":           float(momentum_delta or 0),
+                "secs_since_trend_change":  float(secs_since_trend_change or 0),
+                "prev_trend_encoded":       float(TREND_MAP.get(prev_trend_direction, 0)),
+                "entry_path_encoded":       float(ENTRY_PATH_MAP.get(entry_path or "", 0)),
+                "consec_wins":              float(consec_wins or 0),
+                "ob_at_queue_time":         float(ob_at_queue_time or 0),
+                "cross_asset_agree":        float(cross_asset_agree if cross_asset_agree is not None else 0),
+                "asset_range_15m":          float(asset_range_15m or 0),
+                "cvd_at_entry":             float(cvd_at_entry if cvd_at_entry is not None else 0),
+                "is_afternoon":             float(1 if 14 <= hour < 21 else 0),
+            }
+            # Only include features the loaded model was trained on
+            row = pd.DataFrame(
+                [{k: v for k, v in all_data.items() if k in self._features}],
+                columns=[f for f in self._features if f in all_data],
+            )
 
             prob = float(self._model.predict_proba(row)[0][1])
             return prob

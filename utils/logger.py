@@ -12,15 +12,10 @@ def _normalized_level_name(level_name: str) -> str:
 
 
 def _base_log_level_name() -> str:
-    if settings.ACTIVE_PROFILE == "sentiment":
-        return "DEBUG" if settings.SENTIMENT_VERBOSE else "INFO"
     return _normalized_level_name(settings.LOG_LEVEL)
 
 
 def _min_level_name_for_record(record) -> str:
-    if settings.ACTIVE_PROFILE == "sentiment" and not settings.SENTIMENT_VERBOSE:
-        if record["module"] == "exchange_feed":
-            return "WARNING"
     return _base_log_level_name()
 
 

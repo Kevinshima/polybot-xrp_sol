@@ -109,7 +109,7 @@ class Heartbeat:
             await self._alerter.no_trades_warning(hours_silent)
 
     async def _maybe_reprice_positions(self) -> None:
-        interval = max(30, int(settings.SENTIMENT_REPRICE_INTERVAL_SECONDS))
+        interval = 30
         now = time.time()
         if now - self._last_reprice < interval:
             return
@@ -157,12 +157,12 @@ class Heartbeat:
             entry = pos.entry_price
             meta = self._load_position_meta(pos.metadata_json)
             timeframe = str(meta.get("timeframe") or "5m")
-            asset = str(meta.get("asset") or "BTC")
+            asset = str(meta.get("asset") or "SOL")
 
             exit_reason: Optional[str] = None
-            if timeframe != "5m" and current_price <= entry * (1 - settings.LAB_STOP_LOSS_PCT):
+            if current_price <= entry * (1 - settings.LAB_STOP_LOSS_PCT):
                 exit_reason = "stop_loss"
-            elif timeframe != "5m" and current_price >= entry * (1 + settings.LAB_TAKE_PROFIT_PCT):
+            elif current_price >= entry * (1 + settings.LAB_TAKE_PROFIT_PCT):
                 exit_reason = "take_profit"
 
             if not exit_reason:
@@ -184,6 +184,15 @@ class Heartbeat:
                 f"entry={entry:.3f} current={current_price:.3f} "
                 f"PnL={pnl:+.4f} USDC ({asset} {timeframe})"
             )
+            await self._alerter.trade_closed(
+                asset=asset, timeframe=timeframe,
+                outcome="WON" if pnl > 0 else "LOST",
+                pnl=pnl,
+                fill_price=current_price, entry_price=entry,
+                exit_reason=exit_reason,
+                daily_pnl=self._risk.get_daily_pnl(),
+                cumulative_pnl=self._risk.get_cumulative_pnl(),
+            )
 
             if self._latency_arb is not None:
                 if pnl > 0:
@@ -192,72 +201,6 @@ class Heartbeat:
                     self._latency_arb.on_stop_loss(timeframe, asset)
                 else:
                     self._latency_arb.on_loss(timeframe, asset)
-
-    async def _maybe_manage_sentiment_positions(self) -> None:
-        if not settings.SENTIMENT_PAPER_EXIT_ENABLED:
-            return
-
-        now = time.time()
-        for pos in list(self._portfolio.all_positions()):
-            if pos.strategy != "ai_sentiment":
-                continue
-
-            meta = self._load_position_meta(pos.metadata_json)
-            trade_type = str(meta.get("trade_type", "reaction"))
-            age_minutes = (now - pos.opened_at) / 60
-            current_return = self._position_return(pos, pos.current_price)
-            entry_edge = float(meta.get("entry_edge") or 0.0)
-            invalidation_pct = float(
-                meta.get("thesis_invalidation_pct", settings.SENTIMENT_THESIS_INVALIDATION_PCT)
-            )
-            stop_loss_pct = float(meta.get("stop_loss_pct", settings.SENTIMENT_STOP_LOSS_PCT))
-            take_profit_pct = float(meta.get("take_profit_pct", settings.SENTIMENT_TAKE_PROFIT_PCT))
-            time_stop_minutes = float(meta.get("time_stop_minutes", settings.SENTIMENT_TIME_STOP_MINUTES))
-
-            exit_reason: Optional[str] = None
-            if current_return >= take_profit_pct:
-                exit_reason = "take_profit"
-            elif current_return <= -stop_loss_pct:
-                exit_reason = "stop_loss"
-            else:
-                wrong_way_move = max(entry_edge * 0.5, invalidation_pct)
-                if pos.side == "BUY" and pos.current_price <= max(0.01, pos.entry_price - wrong_way_move):
-                    exit_reason = "thesis_invalidation"
-                elif pos.side == "SELL" and pos.current_price >= min(0.99, pos.entry_price + wrong_way_move):
-                    exit_reason = "thesis_invalidation"
-                elif age_minutes >= time_stop_minutes:
-                    exit_reason = "time_stop"
-
-            if not exit_reason:
-                continue
-
-            pnl = self._portfolio.close_position(pos.market_id, pos.current_price)
-            if pnl is None:
-                continue
-
-            db.update_trades_for_market(
-                pos.market_id,
-                fill_price=pos.current_price,
-                pnl=pnl,
-                exit_reason=exit_reason,
-            )
-            self._risk.record_fill(pnl)
-            logger.info(
-                f"SentimentExit: {pos.question[:50]}… type={trade_type} reason={exit_reason} "
-                f"price={pos.current_price:.4f} pnl={pnl:+.4f}"
-            )
-            # Persist cooldown so the sentiment strategy cannot immediately re-enter.
-            # stop_loss → 4-hour block; all others → normal cooldown restarts from exit.
-            _cd_secs = settings.SENTIMENT_COOLDOWN_MINUTES * 60
-            if exit_reason == "stop_loss":
-                _block = 4 * 3600
-                _cd_ts = time.time() + (_block - _cd_secs)
-            else:
-                _cd_ts = time.time()
-            try:
-                db.set_market_cooldown(pos.market_id, _cd_ts, "ai_sentiment")
-            except Exception:
-                pass
 
     async def _maybe_resolve_positions(self) -> None:
         now = time.time()
@@ -301,8 +244,12 @@ class Heartbeat:
                         pass  # fall through to Gamma below
 
                 if fill_price is None:
-                    # CLOB unavailable or position too old — use Gamma API
+                    # CLOB unavailable or position too old — try Gamma first
                     fill_price, pnl, outcome = await self._resolve_via_gamma(session, pos)
+
+                if fill_price is None:
+                    # Gamma doesn't index updown markets — fall back to CLOB market endpoint
+                    fill_price, pnl, outcome = await self._resolve_via_clob_market(session, pos)
                     if fill_price is None:
                         continue  # genuinely undetermined — skip for now
 
@@ -321,6 +268,21 @@ class Heartbeat:
                 self._risk.record_fill(pnl)
                 self._last_trade_ts = time.time()
 
+                # Parse metadata once — used for alert + latency_arb callbacks
+                _meta = self._load_position_meta(pos.metadata_json)
+                _tf = str(_meta.get("timeframe") or "?")
+                _asset = str(_meta.get("asset") or "SOL")
+
+                if pos.strategy == "latency_arb":
+                    await self._alerter.trade_closed(
+                        asset=_asset, timeframe=_tf,
+                        outcome=outcome, pnl=pnl,
+                        fill_price=fill_price, entry_price=pos.entry_price,
+                        exit_reason="resolved",
+                        daily_pnl=self._risk.get_daily_pnl(),
+                        cumulative_pnl=self._risk.get_cumulative_pnl(),
+                    )
+
                 # Track consecutive losses for alerts
                 if pnl < 0:
                     self._consec_losses += 1
@@ -334,13 +296,10 @@ class Heartbeat:
                     self._consec_loss_total = 0.0
 
                 if self._latency_arb is not None:
-                    meta = self._load_position_meta(pos.metadata_json)
-                    timeframe = str(meta.get("timeframe") or "")
-                    asset = str(meta.get("asset") or "BTC")
                     if pnl > 0:
-                        self._latency_arb.on_win(timeframe, asset)
+                        self._latency_arb.on_win(_tf, _asset)
                     else:
-                        self._latency_arb.on_loss(timeframe, asset)
+                        self._latency_arb.on_loss(_tf, _asset)
 
     async def _resolve_via_gamma(
         self, session: aiohttp.ClientSession, pos
@@ -400,6 +359,57 @@ class Heartbeat:
             logger.warning(
                 f"PositionResolver: {pos.question[:40]}… closed with no outcome "
                 f"prices — marking LOST conservatively"
+            )
+            return 0.0, self._position_pnl(pos, 0.0), "LOST"
+
+        return None, None, None
+
+    async def _resolve_via_clob_market(
+        self, session: aiohttp.ClientSession, pos
+    ) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+        """
+        Second fallback resolver using the CLOB /markets/{condition_id} endpoint.
+        The btc/eth-updown-5m markets are NOT indexed by Gamma, so this is the
+        only reliable way to get final outcome data for these automated markets.
+
+        Checks tokens[].winner by matching pos.token_id.
+        Returns (fill_price, pnl, outcome) or (None, None, None) if undetermined.
+        """
+        url = f"https://clob.polymarket.com/markets/{pos.market_id}"
+        try:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(
+                        f"PositionResolver: CLOB market endpoint returned {resp.status} "
+                        f"for {pos.market_id[:20]}…"
+                    )
+                    return None, None, None
+                market = await resp.json()
+        except Exception as exc:
+            logger.warning(f"PositionResolver: CLOB market fetch failed: {exc}")
+            return None, None, None
+
+        if not market.get("closed", False):
+            return None, None, None  # market still live
+
+        tokens = market.get("tokens", [])
+        for token in tokens:
+            if str(token.get("token_id", "")) != str(pos.token_id):
+                continue
+            winner = token.get("winner")
+            if winner is True:
+                return 1.0, self._position_pnl(pos, 1.0), "WON"
+            elif winner is False:
+                return 0.0, self._position_pnl(pos, 0.0), "LOST"
+
+        # Market closed but our token not found — mark LOST conservatively
+        if tokens:
+            logger.warning(
+                f"PositionResolver: {pos.question[:40]}… CLOB closed, token not found "
+                f"— marking LOST conservatively"
             )
             return 0.0, self._position_pnl(pos, 0.0), "LOST"
 

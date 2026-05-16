@@ -131,9 +131,55 @@ class Alerter:
             cooldown=600,
         )
 
+    async def trade_opened(
+        self,
+        asset: str,
+        direction: str,
+        timeframe: str,
+        entry_path: str,
+        size_usdc: float,
+        mid: float,
+        momentum: float,
+        ml_prob,
+        dry_run: bool = True,
+    ) -> None:
+        tag = "[DRY RUN]" if dry_run else "[LIVE]"
+        ml_str = f" | ML {ml_prob:.3f}" if ml_prob is not None else ""
+        await self.send(
+            f"Trade OPENED {tag}\n"
+            f"{asset} {direction} {timeframe} | {entry_path}\n"
+            f"${size_usdc:.2f} @ {mid:.3f}\n"
+            f"Mom: {momentum:+.2%}{ml_str}",
+            category=f"trade_open_{asset}",
+            cooldown=5,
+        )
+
+    async def trade_closed(
+        self,
+        asset: str,
+        timeframe: str,
+        outcome: str,
+        pnl: float,
+        fill_price: float,
+        entry_price: float,
+        exit_reason: str,
+        daily_pnl: float,
+        cumulative_pnl: float,
+    ) -> None:
+        icon = "✅" if pnl > 0 else "❌"
+        result = "WIN" if pnl > 0 else "LOSS"
+        await self.send(
+            f"{icon} {result}: {pnl:+.2f} USDC\n"
+            f"{asset} {timeframe} | {exit_reason}\n"
+            f"{entry_price:.3f} -> {fill_price:.3f}\n"
+            f"Daily: {daily_pnl:+.2f} | Total: {cumulative_pnl:+.2f}",
+            category=f"trade_close_{asset}",
+            cooldown=5,
+        )
+
     async def no_trades_warning(self, hours: float) -> None:
         await self.send(
-            f"😴 *No trades in {hours:.0f}h* — check if bot is filtering too aggressively or signals stopped",
+            f"😴 No trades in {hours:.0f}h — check if bot is filtering too aggressively or signals stopped",
             category="no_trades",
             cooldown=3600,
         )
@@ -164,10 +210,11 @@ class Alerter:
 
     async def _send_telegram(self, text: str) -> None:
         url = f"https://api.telegram.org/bot{self._token}/sendMessage"
+        # Strip Markdown symbols so strategy names with underscores don't break the parser
+        plain = text.replace("*", "").replace("`", "").replace("_", " ")
         payload = {
             "chat_id": self._chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
+            "text": plain,
         }
         try:
             async with aiohttp.ClientSession() as session:

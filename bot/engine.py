@@ -13,6 +13,7 @@ from core.portfolio import get_portfolio
 from core.risk_manager import get_risk_manager
 from bot.heartbeat import Heartbeat
 from data.exchange_feed import get_exchange_feed
+from data.polymarket_feed import get_polymarket_feed
 from database import db
 from monitoring.alerter import get_alerter
 from utils.logger import logger
@@ -59,25 +60,9 @@ def _build_strategies() -> list:
     """Instantiate enabled strategies."""
     strategies = []
 
-    if settings.COPY_TRADER_ENABLED:
-        from strategies.copy_trader import CopyTrader
-        strategies.append(CopyTrader())
-
-    if settings.MARKET_MAKER_ENABLED:
-        from strategies.market_maker import MarketMaker
-        strategies.append(MarketMaker())
-
     if settings.LATENCY_ARB_ENABLED:
         from strategies.latency_arb import LatencyArb
         strategies.append(LatencyArb())
-
-    if settings.AI_SENTIMENT_ENABLED:
-        from strategies.ai_sentiment import AISentiment
-        strategies.append(AISentiment())
-
-    if settings.SYNTH_ARB_ENABLED:
-        from strategies.synth_arb import SynthArb
-        strategies.append(SynthArb())
 
     return strategies
 
@@ -122,6 +107,7 @@ async def run() -> None:
     risk = get_risk_manager()
     order_manager = get_order_manager()
     exchange_feed = get_exchange_feed()
+    polymarket_feed = get_polymarket_feed()
 
     # ── Restore open positions from DB ────────────────────────────────────────
     saved_positions = db.get_open_positions()
@@ -183,6 +169,8 @@ async def run() -> None:
 
     # Exchange data feed (needed for latency arb)
     tasks.append(asyncio.create_task(exchange_feed.run(), name="exchange_feed"))
+    # Polymarket real-time market feed — replaces HTTP get_midpoint() polling
+    tasks.append(asyncio.create_task(polymarket_feed.run(), name="polymarket_feed"))
 
     # Strategy tasks — wrapped in supervisor for auto-restart on crash
     for strat in strategies:
@@ -212,7 +200,7 @@ async def run() -> None:
     await shutdown_event.wait()
 
     logger.info("Shutting down…")
-    asyncio.ensure_future(alerter.bot_stopped())
+    await alerter.bot_stopped()
 
     # Cancel all open orders (belt-and-suspenders)
     try:
@@ -225,6 +213,11 @@ async def run() -> None:
         await exchange_feed.stop()
     except Exception as exc:
         logger.error(f"exchange_feed stop failed: {exc}")
+
+    try:
+        await polymarket_feed.stop()
+    except Exception as exc:
+        logger.error(f"polymarket_feed stop failed: {exc}")
 
     # Cancel async tasks
     for task in tasks:

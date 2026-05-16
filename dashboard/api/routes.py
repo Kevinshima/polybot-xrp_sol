@@ -8,12 +8,11 @@ from collections import defaultdict
 from datetime import datetime
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, or_
+from sqlalchemy import func
 
-from sqlalchemy import distinct
 from core.risk_manager import get_risk_manager
 from database import db
-from database.models import NewsAnalysis, NewsItem, OpenPosition, SentimentDecision, Trade
+from database.models import OpenPosition, Trade
 
 router = APIRouter(prefix="/api")
 
@@ -54,7 +53,7 @@ async def get_pnl_by_asset():
         )
     result = []
     for asset, trade_count, total_pnl in asset_rows:
-        asset_name = asset or "BTC"
+        asset_name = asset or "SOL"
         with db.get_session() as s:
             closed = (
                 s.query(Trade)
@@ -161,8 +160,10 @@ def _detect_timeframe(question: str) -> str:
 
 @router.get("/analytics")
 async def get_analytics():
-    """Full analytics: equity curve per trade, daily bars, per-asset and per-timeframe breakdown."""
-    trades = db.get_all_closed_trades_asc()
+    """Full analytics: equity curve per trade, daily bars, per-asset and entry-path breakdown."""
+    all_trades = db.get_all_closed_trades_asc()
+    # Only show latency_arb trades in analytics — other strategies distort the charts
+    trades = [t for t in all_trades if (t.get("strategy") or "") == "latency_arb"]
 
     # Equity curve — one point per closed trade, running cumulative
     cumulative = 0.0
@@ -175,9 +176,10 @@ async def get_analytics():
             "pnl": round(pnl, 4),
             "cumulative_pnl": round(cumulative, 4),
             "question": (t.get("question") or "")[:60],
-            "asset": t.get("asset") or "BTC",
+            "asset": t.get("asset") or "SOL",
             "timeframe": _detect_timeframe(t.get("question") or ""),
             "side": t.get("side") or "",
+            "entry_path": t.get("entry_path") or "UNKNOWN",
         })
 
     # Daily bars — group by calendar day
@@ -201,7 +203,7 @@ async def get_analytics():
     # By asset
     asset_map: dict = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0, "trades": 0})
     for t in trades:
-        a = t.get("asset") or "BTC"
+        a = t.get("asset") or "SOL"
         pnl = float(t.get("pnl") or 0)
         asset_map[a]["trades"] += 1
         asset_map[a]["pnl"] = round(asset_map[a]["pnl"] + pnl, 4)
@@ -211,250 +213,100 @@ async def get_analytics():
             asset_map[a]["losses"] += 1
     by_asset = [{"asset": k, **v} for k, v in sorted(asset_map.items())]
 
-    # By timeframe
-    tf_map: dict = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0, "trades": 0})
+    # By entry path
+    path_map: dict = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0, "trades": 0})
     for t in trades:
-        tf = _detect_timeframe(t.get("question") or "")
+        path = t.get("entry_path") or "UNKNOWN"
         pnl = float(t.get("pnl") or 0)
-        tf_map[tf]["trades"] += 1
-        tf_map[tf]["pnl"] = round(tf_map[tf]["pnl"] + pnl, 4)
+        path_map[path]["trades"] += 1
+        path_map[path]["pnl"] = round(path_map[path]["pnl"] + pnl, 4)
         if pnl > 0:
-            tf_map[tf]["wins"] += 1
+            path_map[path]["wins"] += 1
         else:
-            tf_map[tf]["losses"] += 1
-    by_timeframe = [{"timeframe": k, **v} for k, v in sorted(tf_map.items())]
+            path_map[path]["losses"] += 1
+    by_entry_path = [{"entry_path": k, **v} for k, v in sorted(path_map.items()) if k != "UNKNOWN"]
 
     return {
         "equity_curve": equity_curve,
         "daily_bars": daily_bars,
         "by_asset": by_asset,
-        "by_timeframe": by_timeframe,
+        "by_entry_path": by_entry_path,
     }
 
 
-# ── Sentiment profile routes ───────────────────────────────────────────────────
 
-@router.get("/sentiment/news")
-async def get_sentiment_news():
-    try:
-        return db.get_recent_news(limit=50)
-    except Exception:
-        return []
-
-
-@router.get("/sentiment/decisions")
-async def get_sentiment_decisions():
-    try:
-        return db.get_recent_decisions(limit=50)
-    except Exception:
-        return []
-
-
-@router.get("/sentiment/status")
-async def get_sentiment_status():
-    from config import settings
-    daily_pnl = db.get_strategy_daily_pnl("ai_sentiment")
-    return {
-        "profile": getattr(settings, "ACTIVE_PROFILE", "latency"),
-        "analyzer": getattr(settings, "SENTIMENT_ANALYZER", "keyword"),
-        "anthropic_key_set": bool(
-            getattr(settings, "ANTHROPIC_API_KEY", "")
-            and settings.ANTHROPIC_API_KEY not in ("your-anthropic-key", "")
-        ),
-        "newsapi_key_set": bool(
-            getattr(settings, "NEWS_API_KEY", "")
-            and settings.NEWS_API_KEY not in ("your-newsapi-key", "")
-        ),
-        "strategy_daily_pnl": round(daily_pnl, 4),
-        "strategy_loss_cap": getattr(settings, "SENTIMENT_MAX_DAILY_LOSS", 0.0),
-        "strategy_halted": daily_pnl <= -getattr(settings, "SENTIMENT_MAX_DAILY_LOSS", 0.0),
-    }
-
-
-@router.get("/synth_arb/stats")
-async def get_synth_arb_stats():
-    """Synth arb open positions + lifetime stats for the dashboard panel."""
+@router.get("/latency_arb/stats")
+async def get_latency_arb_stats():
+    """Filter rejection counts, ML shadow info, and regime for the dashboard."""
+    import re
+    from datetime import datetime, timezone, timedelta
+    from pathlib import Path
     from config import settings as _s
-    enabled = getattr(_s, "SYNTH_ARB_ENABLED", False)
 
-    # Live open positions from the running strategy instance
-    positions: list[dict] = []
+    # Parse last 24h of log for filter rejections
+    rejections: dict[str, int] = defaultdict(int)
+    log_path = Path(_s.LOG_FILE)
+    if log_path.exists():
+        cutoff_ts = time.time() - 86400
+        for line in log_path.read_text().splitlines():
+            if "LatencyArb reject" not in line:
+                continue
+            m_reason = re.search(r"reason=(\w+)", line)
+            if not m_reason:
+                continue
+            rejections[m_reason.group(1)] += 1
+
+    # ML model metadata
+    ml_info: dict = {}
+    _pkl_err = None
     try:
-        from strategies.synth_arb import get_synth_arb
-        strat = get_synth_arb()
-        if strat is not None:
-            positions = strat.open_positions_summary()
-    except Exception:
-        pass
+        import joblib
+        from pathlib import Path as _Path
+        pkl_path = _Path(_s.DB_PATH).parent / "ml_model.pkl"
+        model_data = joblib.load(pkl_path)
+        ml_info = {
+            "n_trades": model_data.get("n_trades", "?"),
+            "cv_roc_auc": model_data.get("cv_roc_auc", "?"),
+            "win_rate": model_data.get("win_rate", "?"),
+            "trained_at": str(model_data.get("trained_at", "?"))[:19],
+            "gate_enabled": getattr(_s, "GATE_ENABLED", False),
+            "afternoon_auc": model_data.get("afternoon_cv_roc_auc", "?"),
+        }
+    except Exception as _e:
+        _pkl_err = str(_e)
 
-    # Historical stats from DB
-    daily_pnl = db.get_strategy_daily_pnl("synth_arb")
-    cumulative_pnl = db.get_strategy_cumulative_pnl("synth_arb")
-
+    # Hours since last latency_arb trade
+    hours_since: float | None = None
     with db.get_session() as s:
-        closed = (
+        last = (
             s.query(Trade)
-            .filter(Trade.strategy == "synth_arb", Trade.status == "closed")
-            .all()
-        )
-    total_trades = len(closed)
-    wins = [t for t in closed if float(t.pnl or 0) > 0]
-    win_rate = len(wins) / total_trades if total_trades else 0.0
-    avg_gap = (
-        sum(float(t.pnl or 0) / float(t.size or 1) for t in wins) / len(wins)
-        if wins else 0.0
-    )
-
-    return {
-        "enabled": enabled,
-        "open_count": len(positions),
-        "positions": positions,
-        "daily_pnl": round(daily_pnl, 4),
-        "cumulative_pnl": round(cumulative_pnl, 4),
-        "total_trades": total_trades,
-        "win_rate": round(win_rate, 4),
-        "avg_gap_pct": round(avg_gap * 100, 2),
-    }
-
-
-def _trade_mark_pnl(trade: Trade, open_position: OpenPosition | None) -> float:
-    if trade.status == "closed":
-        return float(trade.pnl or 0.0)
-    mark_price = None
-    entry_price = float(trade.price or 0.0)
-    if open_position is not None:
-        mark_price = float(open_position.current_price or 0.0)
-        entry_price = float(open_position.entry_price or entry_price)
-    elif trade.fill_price:
-        mark_price = float(trade.fill_price)
-    else:
-        mark_price = float(trade.price or 0.0)
-
-    size = float(trade.size or 0.0)
-    if trade.side == "SELL":
-        return size * (entry_price - mark_price)
-    return size * (mark_price - entry_price)
-
-
-@router.get("/sentiment/metrics")
-async def get_sentiment_metrics():
-    now = int(time.time())
-    horizons = {
-        "15m": 15 * 60,
-        "1h": 60 * 60,
-        "4h": 4 * 60 * 60,
-        "24h": 24 * 60 * 60,
-    }
-
-    with db.get_session() as s:
-        headlines_seen = s.query(func.count(NewsItem.id)).scalar() or 0
-        relevant_headlines = (
-            s.query(func.count(func.distinct(NewsAnalysis.news_item_id)))
-            .filter(NewsAnalysis.is_relevant.is_(True))
-            .scalar()
-            or 0
-        )
-        mapped_headlines = (
-            s.query(func.count(func.distinct(SentimentDecision.news_item_id)))
-            .filter(
-                or_(
-                    SentimentDecision.skip_reason.is_(None),
-                    SentimentDecision.skip_reason != "no_market_mapping",
-                )
-            )
-            .scalar()
-            or 0
-        )
-        sentiment_trades = (
-            s.query(Trade)
-            .filter(Trade.strategy == "ai_sentiment")
+            .filter(Trade.strategy == "latency_arb")
             .order_by(Trade.timestamp.desc())
-            .all()
+            .first()
         )
-        open_positions = {
-            row.market_id: row
-            for row in s.query(OpenPosition).filter(OpenPosition.strategy == "ai_sentiment").all()
-        }
-        decisions = (
-            s.query(SentimentDecision, NewsItem)
-            .join(NewsItem, NewsItem.id == SentimentDecision.news_item_id)
-            .filter(SentimentDecision.decision.in_(("buy_yes", "buy_no")))
-            .all()
-        )
+        if last:
+            hours_since = round((time.time() - float(last.timestamp)) / 3600, 1)
 
-    trade_lookup = {trade.id: trade for trade in sentiment_trades}
-    trade_by_market: dict[str, Trade] = {}
-    for trade in sentiment_trades:
-        trade_by_market.setdefault(trade.market_id, trade)
-    horizon_metrics = {
-        key: {"eligible_trades": 0, "total_pnl": 0.0, "avg_pnl": 0.0, "win_rate": 0.0}
-        for key in horizons
-    }
-    by_source: dict[str, dict] = {}
-    by_theme: dict[str, dict] = {}
-    traded_headline_ids: set[int] = set()
-
-    for key, seconds in horizons.items():
-        eligible = [trade for trade in sentiment_trades if now - int(trade.timestamp or 0) >= seconds]
-        pnls = [_trade_mark_pnl(trade, open_positions.get(trade.market_id)) for trade in eligible]
-        wins = [pnl for pnl in pnls if pnl > 0]
-        horizon_metrics[key] = {
-            "eligible_trades": len(eligible),
-            "total_pnl": round(sum(pnls), 4),
-            "avg_pnl": round(sum(pnls) / len(pnls), 4) if pnls else 0.0,
-            "win_rate": round(len(wins) / len(pnls), 4) if pnls else 0.0,
-        }
-
-    for decision, news_item in decisions:
-        trade = trade_lookup.get(decision.trade_id) or trade_by_market.get(decision.market_id)
-        if trade is None:
-            continue
-        traded_headline_ids.add(int(decision.news_item_id))
-        pnl = _trade_mark_pnl(trade, open_positions.get(trade.market_id))
-        source_key = (news_item.source or "unknown").strip() or "unknown"
-        theme_key = (decision.theme or "unknown").strip() or "unknown"
-
-        source_bucket = by_source.setdefault(source_key, {"source": source_key, "trades": 0, "total_pnl": 0.0, "wins": 0})
-        source_bucket["trades"] += 1
-        source_bucket["total_pnl"] += pnl
-        if pnl > 0:
-            source_bucket["wins"] += 1
-
-        theme_bucket = by_theme.setdefault(theme_key, {"theme": theme_key, "trades": 0, "total_pnl": 0.0, "wins": 0})
-        theme_bucket["trades"] += 1
-        theme_bucket["total_pnl"] += pnl
-        if pnl > 0:
-            theme_bucket["wins"] += 1
-
-    def finalize(rows: dict[str, dict], key_name: str) -> list[dict]:
-        result = []
-        for _, row in rows.items():
-            trades = int(row["trades"])
-            total_pnl = float(row["total_pnl"])
-            wins = int(row["wins"])
-            result.append(
-                {
-                    key_name: row[key_name],
-                    "trades": trades,
-                    "total_pnl": round(total_pnl, 4),
-                    "avg_pnl": round(total_pnl / trades, 4) if trades else 0.0,
-                    "win_rate": round(wins / trades, 4) if trades else 0.0,
-                }
-            )
-        return sorted(result, key=lambda row: (row["total_pnl"], row["trades"]), reverse=True)
+    # Current regime
+    utc_hour = datetime.now(timezone.utc).hour
+    if utc_hour >= 21 or utc_hour < 7:
+        regime = "Overnight (filtered)"
+    elif 7 <= utc_hour < 9:
+        regime = "EU Open"
+    elif 9 <= utc_hour < 14:
+        regime = "Mid-Session"
+    elif 14 <= utc_hour < 21:
+        regime = "Afternoon (active)"
+    else:
+        regime = "Unknown"
 
     return {
-        "funnel": {
-            "headlines_seen": headlines_seen,
-            "relevant_headlines": relevant_headlines,
-            "mapped_headlines": mapped_headlines,
-            "traded_headlines": len(traded_headline_ids),
-            "traded_markets": len(sentiment_trades),
-            "open_positions": len(open_positions),
-            "daily_pnl": round(db.get_strategy_daily_pnl("ai_sentiment"), 4),
-            "cumulative_pnl": round(db.get_strategy_cumulative_pnl("ai_sentiment"), 4),
-        },
-        "horizons": horizon_metrics,
-        "by_source": finalize(by_source, "source")[:8],
-        "by_theme": finalize(by_theme, "theme")[:8],
+        "filter_rejections": dict(rejections),
+        "total_rejected": sum(rejections.values()),
+        "ml": ml_info,
+        "hours_since_last_trade": hours_since,
+        "regime": regime,
+        "utc_hour": utc_hour,
     }
+
+

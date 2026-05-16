@@ -39,7 +39,8 @@ class OrderManager:
         shares = size_usdc / price if price > 0 else 0
 
         approved, reason = self._risk.approve_order(side, size_usdc, market_id, strategy)
-        assert approved, f"RiskManager rejected order: {reason}"
+        if not approved:
+            raise AssertionError(f"RiskManager rejected order: {reason}")
 
         from config import settings
         if settings.DRY_RUN:
@@ -116,48 +117,81 @@ class OrderManager:
         side: str,
         size_usdc: float,
         price: float = 0.0,
-        asset: str = "BTC",
+        asset: str = "SOL",
         momentum_at_entry: float | None = None,
         ob_imbalance_at_entry: float | None = None,
+        cvd_at_entry: float | None = None,
         trend_slope_at_entry: float | None = None,
         trend_direction_at_entry: str | None = None,
         consec_losses_at_entry: int | None = None,
         timeframe: str | None = None,
         ml_win_prob: float | None = None,
+        momentum_delta: float | None = None,
+        secs_since_trend_change: float | None = None,
+        prev_trend_direction: str | None = None,
+        entry_path: str | None = None,
+        consec_wins: int | None = None,
+        ob_at_queue_time: float | None = None,
+        cross_asset_agree: int | None = None,
+        asset_range_15m: float | None = None,
     ) -> Optional[dict]:
         """FOK market order for latency-sensitive strategies."""
         from py_clob_client.clob_types import MarketOrderArgs
 
         approved, reason = self._risk.approve_order(side, size_usdc, market_id, strategy)
-        assert approved, f"RiskManager rejected order: {reason}"
+        if not approved:
+            raise AssertionError(f"RiskManager rejected order: {reason}")
 
         from config import settings
         try:
             if settings.DRY_RUN:
                 order_id = f"dry_mkt_{int(time.time() * 1000)}"
+                # Apply taker fee: DRY_RUN mirrors live trading economics.
+                # Fetch real dynamic fee from Polymarket API (cached per token).
+                # Falls back to TAKER_FEE_RATE if the API call fails.
+                try:
+                    _fee_bps = self._client.client.get_fee_rate_bps(token_id)
+                    _fee_rate = _fee_bps / 10000 if _fee_bps else settings.TAKER_FEE_RATE
+                except Exception:
+                    _fee_rate = settings.TAKER_FEE_RATE
+                # Polymarket fee formula: fee = collateral × feeRate × p × (1-p)
+                # At p=0.455 with feeRate=0.10: effective ~2.5% of collateral (not flat 10%)
+                _fee_usdc = size_usdc * _fee_rate * price * (1 - price) if price > 0 else 0.0
+                _shares = ((size_usdc - _fee_usdc) / price) if price > 0 else size_usdc
+                _effective_entry = (size_usdc / _shares) if _shares > 0 else price
                 insert_trade(
                     trade_id=order_id,
                     strategy=strategy,
                     market_id=market_id,
                     question=question,
                     side=side,
-                    size=size_usdc / price if price > 0 else size_usdc,
-                    price=price,
-                    fill_price=price,
+                    size=_shares,
+                    price=_effective_entry,
+                    fill_price=_effective_entry,
                     status="filled",
                     dry_run=True,
                     asset=asset,
                     momentum_at_entry=momentum_at_entry,
                     ob_imbalance_at_entry=ob_imbalance_at_entry,
+                    cvd_at_entry=cvd_at_entry,
                     trend_slope_at_entry=trend_slope_at_entry,
                     trend_direction_at_entry=trend_direction_at_entry,
                     consec_losses_at_entry=consec_losses_at_entry,
                     timeframe=timeframe,
                     ml_win_prob=ml_win_prob,
+                    momentum_delta=momentum_delta,
+                    secs_since_trend_change=secs_since_trend_change,
+                    prev_trend_direction=prev_trend_direction,
+                    entry_path=entry_path,
+                    consec_wins=consec_wins,
+                    ob_at_queue_time=ob_at_queue_time,
+                    cross_asset_agree=cross_asset_agree,
+                    asset_range_15m=asset_range_15m,
                 )
                 logger.debug(f"DB insert OK — dry run trade {order_id} saved")
                 logger.info(
-                    f"DRY RUN — FOK market order {side} {size_usdc} USDC on {market_id}"
+                    f"DRY RUN — FOK market order {side} {size_usdc} USDC on {market_id} "
+                    f"(fee_rate={_fee_rate:.1%} fee_usdc={_fee_usdc:.3f} effective_entry={_effective_entry:.4f} shares={_shares:.4f})"
                 )
                 return {"id": order_id, "status": "dry_run"}
 
@@ -183,6 +217,14 @@ class OrderManager:
                 consec_losses_at_entry=consec_losses_at_entry,
                 timeframe=timeframe,
                 ml_win_prob=ml_win_prob,
+                momentum_delta=momentum_delta,
+                secs_since_trend_change=secs_since_trend_change,
+                prev_trend_direction=prev_trend_direction,
+                entry_path=entry_path,
+                consec_wins=consec_wins,
+                ob_at_queue_time=ob_at_queue_time,
+                cross_asset_agree=cross_asset_agree,
+                asset_range_15m=asset_range_15m,
             )
             return result
         except AssertionError:

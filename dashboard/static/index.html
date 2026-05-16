@@ -50,6 +50,42 @@
     <div class="label">Daily Loss / Cap</div>
     <div class="value neutral" id="daily-loss">—</div>
   </div>
+  <div class="card">
+    <div class="label">Regime</div>
+    <div class="value neutral" id="regime-label">—</div>
+  </div>
+  <div class="card">
+    <div class="label">No-Trade Streak</div>
+    <div class="value neutral" id="no-trade-hours">—</div>
+  </div>
+</div>
+
+<!-- Filter stats row -->
+<div class="section" id="filter-section">
+  <h2>Filter Activity (last 24h)</h2>
+  <div class="grid" id="filter-grid">
+    <div class="card"><div class="label">Total Rejected</div><div class="value neutral" id="flt-total">—</div></div>
+    <div class="card"><div class="label">CA Not Aligned</div><div class="value neutral" id="flt-ca">—</div></div>
+    <div class="card"><div class="label">FT Danger Zone</div><div class="value neutral" id="flt-danger">—</div></div>
+    <div class="card"><div class="label">Circuit Breaker</div><div class="value neutral" id="flt-circuit">—</div></div>
+    <div class="card"><div class="label">Delta Not Aligned</div><div class="value neutral" id="flt-delta">—</div></div>
+    <div class="card"><div class="label">Weak OB</div><div class="value neutral" id="flt-ob">—</div></div>
+    <div class="card"><div class="label">Stale Overnight</div><div class="value neutral" id="flt-overnight">—</div></div>
+    <div class="card"><div class="label">Cooldown Active</div><div class="value neutral" id="flt-stale">—</div></div>
+  </div>
+</div>
+
+<!-- ML Shadow panel -->
+<div class="section" id="ml-section">
+  <h2>ML Shadow</h2>
+  <div class="grid">
+    <div class="card"><div class="label">CV AUC</div><div class="value neutral" id="ml-auc">—</div></div>
+    <div class="card"><div class="label">Afternoon AUC</div><div class="value neutral" id="ml-afternoon-auc">—</div></div>
+    <div class="card"><div class="label">Training Trades</div><div class="value neutral" id="ml-n-trades">—</div></div>
+    <div class="card"><div class="label">Train WR</div><div class="value neutral" id="ml-wr">—</div></div>
+    <div class="card"><div class="label">Gate</div><div class="value neutral" id="ml-gate">—</div></div>
+    <div class="card"><div class="label">Last Trained</div><div class="value neutral" id="ml-trained-at">—</div></div>
+  </div>
 </div>
 
 <!-- Strategy status -->
@@ -57,8 +93,6 @@
   <h2>Strategies</h2>
   <div id="strategy-status"></div>
 </div>
-
-<div id="sentiment-priority-anchor"></div>
 
 <!-- Analytics panel -->
 <div class="section" id="chart-section">
@@ -87,8 +121,8 @@
       <div class="mini-chart-box"><canvas id="asset-chart"></canvas></div>
     </div>
     <div class="mini-chart-card">
-      <div class="mini-chart-label">By Timeframe</div>
-      <div class="mini-chart-box"><canvas id="timeframe-chart"></canvas></div>
+      <div class="mini-chart-label">By Entry Path</div>
+      <div class="mini-chart-box"><canvas id="entrypath-chart"></canvas></div>
     </div>
   </div>
 </div>
@@ -135,212 +169,12 @@
   </table>
 </div>
 
-<!-- Synth Arb panel (visible when SYNTH_ARB_ENABLED=true) -->
-<div class="section" id="synth-section" style="display:none">
-  <h2>Synth Arb</h2>
-  <div class="grid" id="synth-metrics-grid">
-    <div class="card">
-      <div class="label">Daily PnL</div>
-      <div class="value neutral" id="synth-daily-pnl">—</div>
-    </div>
-    <div class="card">
-      <div class="label">Cumulative PnL</div>
-      <div class="value neutral" id="synth-cumulative-pnl">—</div>
-    </div>
-    <div class="card">
-      <div class="label">Open Positions</div>
-      <div class="value neutral" id="synth-open-count">—</div>
-    </div>
-    <div class="card">
-      <div class="label">Total Trades</div>
-      <div class="value neutral" id="synth-total-trades">—</div>
-    </div>
-    <div class="card">
-      <div class="label">Win Rate</div>
-      <div class="value neutral" id="synth-win-rate">—</div>
-    </div>
-    <div class="card">
-      <div class="label">Avg Gap Captured</div>
-      <div class="value neutral" id="synth-avg-gap">—</div>
-    </div>
-  </div>
-  <table id="synth-positions-table" style="display:none">
-    <thead>
-      <tr>
-        <th>Market</th>
-        <th>YES Entry</th>
-        <th>NO Entry</th>
-        <th>Cost</th>
-        <th>Payout</th>
-        <th>Gap %</th>
-        <th>Age</th>
-      </tr>
-    </thead>
-    <tbody id="synth-positions-tbody">
-      <tr><td colspan="7" style="color:var(--muted);text-align:center">No open positions</td></tr>
-    </tbody>
-  </table>
-</div>
-
 <!-- Log viewer -->
 <div class="section" id="logs-section">
   <h2>Recent Logs</h2>
   <div id="log-box">Loading…</div>
 </div>
 
-<div id="sentiment-default-anchor"></div>
-
-<!-- Sentiment tab (visible when running sentiment profile) -->
-<div class="section" id="sentiment-section" style="display:none">
-  <h2>AI Sentiment</h2>
-
-  <div class="sentiment-card-grid">
-    <div class="card">
-      <div class="label">Profile</div>
-      <div class="value neutral" id="sent-profile">—</div>
-    </div>
-    <div class="card">
-      <div class="label">Analyzer</div>
-      <div class="value neutral" id="sent-analyzer">—</div>
-    </div>
-    <div class="card">
-      <div class="label">Anthropic Key</div>
-      <div class="value neutral" id="sent-anthropic">—</div>
-    </div>
-    <div class="card">
-      <div class="label">NewsAPI Key</div>
-      <div class="value neutral" id="sent-newsapi">—</div>
-    </div>
-  </div>
-
-  <div class="sentiment-grid">
-    <div class="sentiment-panel">
-      <h3>Recent News</h3>
-      <div class="sentiment-table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Published</th>
-              <th>Source</th>
-              <th>Title</th>
-              <th>Themes</th>
-            </tr>
-          </thead>
-          <tbody id="sent-news-tbody">
-            <tr><td colspan="4" style="color:var(--muted);text-align:center">Loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="sentiment-panel">
-      <h3>Decisions</h3>
-      <div class="sentiment-table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Market</th>
-              <th>Price</th>
-              <th>Fair</th>
-              <th>Edge</th>
-              <th>Decision</th>
-              <th>Skip Reason</th>
-            </tr>
-          </thead>
-          <tbody id="sent-decisions-tbody">
-            <tr><td colspan="6" style="color:var(--muted);text-align:center">Loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <div class="sentiment-grid">
-    <div class="sentiment-panel">
-      <h3>Funnel</h3>
-      <div class="sentiment-card-grid sentiment-funnel-grid">
-        <div class="card">
-          <div class="label">Headlines Seen</div>
-          <div class="value neutral" id="sent-seen">—</div>
-        </div>
-        <div class="card">
-          <div class="label">Relevant</div>
-          <div class="value neutral" id="sent-relevant">—</div>
-        </div>
-        <div class="card">
-          <div class="label">Mapped</div>
-          <div class="value neutral" id="sent-mapped">—</div>
-        </div>
-        <div class="card">
-          <div class="label">Traded</div>
-          <div class="value neutral" id="sent-traded">—</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="sentiment-panel">
-      <h3>Paper PnL By Horizon</h3>
-      <div class="sentiment-table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Horizon</th>
-              <th>Eligible Trades</th>
-              <th>Total PnL</th>
-              <th>Avg PnL</th>
-              <th>Win Rate</th>
-            </tr>
-          </thead>
-          <tbody id="sent-horizons-tbody">
-            <tr><td colspan="5" style="color:var(--muted);text-align:center">Loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <div class="sentiment-grid">
-    <div class="sentiment-panel">
-      <h3>By Source</h3>
-      <div class="sentiment-table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Source</th>
-              <th>Trades</th>
-              <th>Total PnL</th>
-              <th>Avg PnL</th>
-              <th>Win Rate</th>
-            </tr>
-          </thead>
-          <tbody id="sent-source-tbody">
-            <tr><td colspan="5" style="color:var(--muted);text-align:center">Loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="sentiment-panel">
-      <h3>By Theme</h3>
-      <div class="sentiment-table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Theme</th>
-              <th>Trades</th>
-              <th>Total PnL</th>
-              <th>Avg PnL</th>
-              <th>Win Rate</th>
-            </tr>
-          </thead>
-          <tbody id="sent-theme-tbody">
-            <tr><td colspan="5" style="color:var(--muted);text-align:center">Loading…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-</div>
 
 <div style="height:32px"></div>
 
