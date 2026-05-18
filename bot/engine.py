@@ -14,6 +14,7 @@ from core.risk_manager import get_risk_manager
 from bot.heartbeat import Heartbeat
 from data.exchange_feed import get_exchange_feed
 from data.polymarket_feed import get_polymarket_feed
+from data.rtds_feed import get_rtds_feed
 from database import db
 from monitoring.alerter import get_alerter
 from utils.logger import logger
@@ -108,6 +109,7 @@ async def run() -> None:
     order_manager = get_order_manager()
     exchange_feed = get_exchange_feed()
     polymarket_feed = get_polymarket_feed()
+    rtds_feed = get_rtds_feed()
 
     # ── Restore open positions from DB ────────────────────────────────────────
     saved_positions = db.get_open_positions()
@@ -169,8 +171,10 @@ async def run() -> None:
 
     # Exchange data feed (needed for latency arb)
     tasks.append(asyncio.create_task(exchange_feed.run(), name="exchange_feed"))
-    # Polymarket real-time market feed — replaces HTTP get_midpoint() polling
+    # Polymarket real-time market feed — orderbook + last_trade_price events
     tasks.append(asyncio.create_task(polymarket_feed.run(), name="polymarket_feed"))
+    # RTDS feed — Chainlink oracle prices for independent confirmation
+    tasks.append(asyncio.create_task(rtds_feed.run(), name="rtds_feed"))
 
     # Strategy tasks — wrapped in supervisor for auto-restart on crash
     for strat in strategies:
@@ -218,6 +222,11 @@ async def run() -> None:
         await polymarket_feed.stop()
     except Exception as exc:
         logger.error(f"polymarket_feed stop failed: {exc}")
+
+    try:
+        await rtds_feed.stop()
+    except Exception as exc:
+        logger.error(f"rtds_feed stop failed: {exc}")
 
     # Cancel async tasks
     for task in tasks:

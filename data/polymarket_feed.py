@@ -36,6 +36,7 @@ class PolymarketFeed:
 
     def __init__(self):
         self._token_data: dict[str, dict] = {}  # token_id → {best_bid, best_ask, ts}
+        self._last_trade_ts: dict[str, float] = {}  # token_id → timestamp of last executed trade
         self._all_ids: set[str] = set()          # all tokens we ever want subscribed
         self._running = False
 
@@ -65,6 +66,13 @@ class PolymarketFeed:
         if time.time() - d["ts"] > _STALE_SECS:
             return None
         return d.get("best_bid")
+
+    def get_last_trade_age(self, token_id: str) -> Optional[float]:
+        """Seconds since the last trade executed on this token. None = never seen."""
+        ts = self._last_trade_ts.get(token_id)
+        if ts is None:
+            return None
+        return time.time() - ts
 
     def get_mid(self, token_id: str) -> Optional[float]:
         """Return (best_bid + best_ask) / 2 or None if unavailable."""
@@ -157,6 +165,22 @@ class PolymarketFeed:
             return
 
         event_type = event.get("event_type", "")
+
+        # Track last executed trade timestamp — used for oracle freshness scoring.
+        # A quiet Polymarket token (no trades in 30+s) while Binance is moving
+        # signals an unexploited oracle lag window.
+        if event_type == "last_trade_price":
+            price_str = event.get("price") or event.get("last_trade_price")
+            if price_str:
+                try:
+                    self._last_trade_ts[asset_id] = time.time()
+                    logger.debug(
+                        f"PolymarketFeed last_trade [{asset_id[:16]}…]: "
+                        f"price={float(price_str):.4f}"
+                    )
+                except (ValueError, TypeError):
+                    pass
+            return  # not an orderbook update — exit early
         best_ask: Optional[float] = None
         best_bid: Optional[float] = None
 

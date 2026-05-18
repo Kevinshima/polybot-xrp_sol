@@ -19,6 +19,7 @@ from core.ml_model import get_ml_model
 from data.exchange_feed import get_exchange_feed
 from data.market_scanner import get_scanner
 from data.polymarket_feed import get_polymarket_feed
+from data.rtds_feed import get_rtds_feed
 from monitoring.alerter import get_alerter
 from strategies.base import BaseStrategy
 from utils.logger import logger
@@ -57,6 +58,7 @@ class LatencyArb(BaseStrategy):
         self._exchange_feed = get_exchange_feed()
         self._scanner = get_scanner()
         self._pm_feed = get_polymarket_feed()
+        self._rtds_feed = get_rtds_feed()
         self.MAX_CONCURRENT = settings.LAB_MAX_CONCURRENT_POSITIONS
         self._branch_limits = {
             "5m": settings.LAB_MAX_CONCURRENT_POSITIONS_5M,
@@ -540,6 +542,18 @@ class LatencyArb(BaseStrategy):
         else:
             logger.debug(f"PM feed: using live ask={mid:.4f} for {token_id[:16]}… (skipping HTTP)")
 
+        # ── Oracle freshness — seconds since last trade on this binary token ─────
+        # A quiet Polymarket token (long trade silence) while Binance is moving
+        # means the oracle gap is unexploited: ideal entry timing.
+        # "HOT" = actively repricing (<10s), "ACTIVE" = in-progress (10-30s), "FRESH" = untouched (30+s)
+        _trade_age = self._pm_feed.get_last_trade_age(token_id)
+        _freshness = (
+            "FRESH" if (_trade_age is None or _trade_age > 30)
+            else "ACTIVE" if _trade_age > 10
+            else "HOT"
+        )
+        # ─────────────────────────────────────────────────────────────────────────
+
         # ── Oracle lag computation ────────────────────────────────────────────
         # How much of the Binance move has Polymarket already priced?
         # lag_proxy > 0 = Binance still ahead, edge open.
@@ -717,6 +731,22 @@ class LatencyArb(BaseStrategy):
         # Hard ceiling — never exceed MAX_POSITION_SIZE_USDC regardless of multipliers
         size_usdc = min(size_usdc, settings.MAX_POSITION_SIZE_USDC)
 
+        # Oracle freshness boost removed: bot always enters in the first ~10s of each
+        # 15-minute window when the token is brand-new and has zero trades by definition.
+        # FRESH was always true — the boost was a permanent unconditional size increase.
+
+        # ── Chainlink oracle confirmation (logging only — data collection phase) ─
+        _cl_price = self._rtds_feed.get_chainlink_price(asset.lower())
+        _cl_trend = self._rtds_feed.get_chainlink_trend(asset.lower())
+        _binance_price = self._exchange_feed.get_price(symbol) or 0.0
+        logger.info(
+            f"LatencyArb signals [{asset}]: "
+            f"binance={_binance_price:.4f} chainlink={f'{_cl_price:.4f}' if _cl_price else 'n/a'} "
+            f"cl_trend={_cl_trend or 'n/a'} pm_freshness={_freshness} "
+            f"({f'{_trade_age:.0f}s' if _trade_age is not None else 'no_trades'})"
+        )
+        # ─────────────────────────────────────────────────────────────────────────
+
         logger.info(
             f"LatencyArb size ({asset}): base=${base_size:.0f} "
             f"price_mult={price_mult:.2f} momentum_mult={momentum_mult} {ob_tier}_mult={ob_mult:.2f}x "
@@ -734,6 +764,38 @@ class LatencyArb(BaseStrategy):
             logger.info(
                 f"LatencyArb reject [{asset}]: {timeframe} reason=cvd_opposes_fasttrack "
                 f"cvd={_cvd:.3f} threshold=±{settings.LAB_CVD_FASTTRACK_BLOCK_THRESHOLD} path=FAST_TRACK"
+            )
+            return False
+
+        # ── CVD hard block for CONFIRMED ──────────────────────────────────────
+        # CONFIRMED has no Binance momentum guarantee — it relies on a 5-second
+        # persistence of a Polymarket drift. When CVD strongly opposes direction
+        # (|cvd| > 0.65), taker flow is actively fighting the trade: 8 losses,
+        # 1 win observed (16-05-18). Uses a higher threshold than FAST_TRACK (0.35)
+        # because CONFIRMED already has a weaker signal and some CVD opposition
+        # is normal in choppy markets.
+        if (entry_path == "CONFIRMED"
+                and ob_tier == "CVD_WEAK"
+                and _cvd is not None
+                and abs(_cvd) > 0.65):
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=cvd_opposes_confirmed "
+                f"cvd={_cvd:.3f} threshold=±0.65 path=CONFIRMED"
+            )
+            return False
+
+        # ── Zero oracle lag block for CONFIRMED ───────────────────────────────
+        # When pm_dist < 0.010 the binary token is essentially at fair value —
+        # there is no oracle lag to exploit. CONFIRMED entries here are pure
+        # directional bets with no edge. Exception: |cvd| > 0.95 allows entry
+        # because extreme taker consensus is a separate signal from oracle lag.
+        _pm_dist_now = abs(mid - 0.50)
+        if (entry_path == "CONFIRMED"
+                and _pm_dist_now < 0.010
+                and (_cvd is None or abs(_cvd) <= 0.95)):
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=zero_oracle_lag "
+                f"pm_dist={_pm_dist_now:.3f} cvd={_cvd:.3f if _cvd is not None else 'n/a'} path=CONFIRMED"
             )
             return False
 
