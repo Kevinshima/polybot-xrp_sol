@@ -159,11 +159,22 @@ class Heartbeat:
             timeframe = str(meta.get("timeframe") or "5m")
             asset = str(meta.get("asset") or "SOL")
 
+            entry_path = meta.get("entry_path", "")
+            direction = meta.get("direction", "")
+
             exit_reason: Optional[str] = None
             if current_price <= entry * (1 - settings.LAB_STOP_LOSS_PCT):
                 exit_reason = "stop_loss"
             elif current_price >= entry * (1 + settings.LAB_TAKE_PROFIT_PCT):
                 exit_reason = "take_profit"
+            elif (
+                entry_path == "CONFIRMED"
+                and direction
+                and pos.token_id
+                and self._latency_arb is not None
+                and self._latency_arb.is_signal_reversed(asset, direction, entry_path, pos.token_id)
+            ):
+                exit_reason = "signal_reversed"
 
             if not exit_reason:
                 continue
@@ -197,7 +208,7 @@ class Heartbeat:
             if self._latency_arb is not None:
                 if pnl > 0:
                     self._latency_arb.on_win(timeframe, asset)
-                elif exit_reason == "stop_loss":
+                elif exit_reason in ("stop_loss", "signal_reversed"):
                     self._latency_arb.on_stop_loss(timeframe, asset)
                 else:
                     self._latency_arb.on_loss(timeframe, asset)

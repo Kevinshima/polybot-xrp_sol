@@ -1240,6 +1240,12 @@ class LatencyArb(BaseStrategy):
                     )
             return
 
+        # Capture pm_dist at queue time so confirmation can verify the oracle lag
+        # hasn't closed during the wait window (Fix 2).
+        _queue_token = updown["up_token_id"] if direction == "UP" else updown["down_token_id"]
+        _queue_ask = self._pm_feed.get_best_ask(_queue_token)
+        _pm_dist_at_queue = abs((_queue_ask - 0.50) if _queue_ask is not None else 0.0)
+
         self._pending_15m[slug] = {
             "momentum": momentum,
             "direction": direction,
@@ -1248,6 +1254,7 @@ class LatencyArb(BaseStrategy):
             "asset": asset,
             "ob_at_queue": self._exchange_feed.get_order_book_imbalance(symbol),
             "momentum_delta": momentum_delta,
+            "pm_dist_at_queue": _pm_dist_at_queue,
         }
         self._last_15m_direction[asset] = direction
         self._last_15m_direction_ts[asset] = time.time()
@@ -1379,6 +1386,27 @@ class LatencyArb(BaseStrategy):
                     branch_open_count=branch_open_count,
                 )
                 continue
+
+            # ── Oracle lag closure check ───────────────────────────────────────
+            # If pm_dist was meaningful at queue time (>= 0.020) but has now
+            # dropped below 0.010, the Polymarket token repriced during the
+            # confirmation wait — the lag we were waiting to exploit is gone.
+            # Skip rather than enter a trade with no oracle lag premise.
+            if market_15m is not None:
+                _dir_chk = pending["direction"]
+                _tok_chk = market_15m["up_token_id"] if _dir_chk == "UP" else market_15m["down_token_id"]
+                _ask_now = self._pm_feed.get_best_ask(_tok_chk)
+                _pm_dist_queued = pending.get("pm_dist_at_queue", 0.0)
+                if _ask_now is not None and _pm_dist_queued >= 0.020:
+                    _pm_dist_now = abs(_ask_now - 0.50)
+                    if _pm_dist_now < 0.010:
+                        logger.info(
+                            f"LatencyArb reject [{asset}]: 15m reason=lag_closed_during_wait "
+                            f"pm_dist_at_queue={_pm_dist_queued:.3f} pm_dist_now={_pm_dist_now:.3f} "
+                            f"path=CONFIRMED"
+                        )
+                        to_remove.append(slug)
+                        continue
 
             # Final mid-price check (use PM feed ask if available)
             if market_15m is not None:
@@ -1591,6 +1619,8 @@ class LatencyArb(BaseStrategy):
                         "timeframe": timeframe,
                         "window_slug": window_slug,
                         "asset": asset,
+                        "direction": "UP" if momentum > 0 else "DOWN",
+                        "entry_path": entry_path or "UNKNOWN",
                     }),
                 )
                 logger.info(
@@ -1679,6 +1709,38 @@ class LatencyArb(BaseStrategy):
                 f"LatencyArb: CONSEC-LOSS GATE ON [{key}] — "
                 f"{settings.LAB_CONSEC_LOSS_PAUSE_SECS}s pause after {losses} consecutive losses"
             )
+
+    def is_signal_reversed(
+        self,
+        asset: str,
+        direction: str,
+        entry_path: str,
+        token_id: str,
+    ) -> bool:
+        """
+        Returns True when a CONFIRMED position should exit early because the
+        Binance signal that triggered entry has reversed AND the oracle lag
+        has closed — meaning both the edge and the momentum premise are gone.
+
+        Conditions (all must hold):
+          - entry_path == CONFIRMED (FAST_TRACK has different risk profile)
+          - Binance momentum has flipped: opposite direction at ≥ 2× threshold
+          - pm_dist < 0.010 (token repriced, no remaining lag to capture)
+        """
+        if entry_path != "CONFIRMED":
+            return False
+        symbol = f"{asset}/USDT"
+        momentum = self._exchange_feed.get_momentum(symbol)
+        if momentum is None:
+            return False
+        threshold = self._15m_required_momentum(asset)
+        ask = self._pm_feed.get_best_ask(token_id)
+        pm_dist = abs((ask - 0.50) if ask is not None else 0.50)
+        if pm_dist >= 0.010:
+            return False  # lag still open — hold
+        reversed_up = (direction == "UP" and momentum < -(threshold * 2.0))
+        reversed_down = (direction == "DOWN" and momentum > (threshold * 2.0))
+        return reversed_up or reversed_down
 
     # ── Utility helpers ───────────────────────────────────────────────────────
 
