@@ -769,6 +769,21 @@ class LatencyArb(BaseStrategy):
             )
             return False
 
+        # ── CVD neutral zone block for FAST_TRACK ────────────────────────────
+        # FAST_TRACK relies on Binance momentum + Polymarket taker flow agreement.
+        # When |cvd| < 0.20 there is almost no taker directional conviction —
+        # the move has no flow backing. Historical: 17 trades at 35% WR, -$76 net.
+        # Cutoff 0.20 is the exact point where WR flips positive (50%+ above it).
+        # NOT applied to CONFIRMED — flat CVD is fine there (57% WR historically).
+        if (entry_path == "FAST_TRACK"
+                and _cvd is not None
+                and abs(_cvd) < 0.20):
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=ft_flat_cvd "
+                f"cvd={_cvd:.3f} |cvd|<0.20 path=FAST_TRACK"
+            )
+            return False
+
         # ── Zero oracle lag block for FAST_TRACK ─────────────────────────────
         # FAST_TRACK fires when Binance moves ≥1.7× threshold. When binance_move=0%
         # AND pm_dist<0.010 simultaneously, there is no Binance move (threshold met
