@@ -829,7 +829,7 @@ class LatencyArb(BaseStrategy):
                 and (_cvd is None or abs(_cvd) <= 0.95)):
             logger.info(
                 f"LatencyArb reject [{asset}]: {timeframe} reason=zero_oracle_lag "
-                f"pm_dist={_pm_dist_now:.3f} cvd={_cvd:.3f if _cvd is not None else 'n/a'} path=CONFIRMED"
+                f"pm_dist={_pm_dist_now:.3f} cvd={f'{_cvd:.3f}' if _cvd is not None else 'n/a'} path=CONFIRMED"
             )
             return False
 
