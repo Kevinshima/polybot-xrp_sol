@@ -559,6 +559,8 @@ class LatencyArb(BaseStrategy):
         # lag_proxy > 0 = Binance still ahead, edge open.
         # lag_proxy < 0 = Polymarket caught up, edge closed.
         # LAB_MIN_ORACLE_LAG = -999 (shadow/log mode) — set > 0 to activate gate.
+        _binance_move = None
+        _pm_from_neutral = None
         _open_snap = self._window_open_snapshots.get(slug)
         if _open_snap and _open_snap.get("binance_price", 0) > 0:
             _current_binance = self._exchange_feed.get_price(symbol) or 0.0
@@ -764,6 +766,23 @@ class LatencyArb(BaseStrategy):
             logger.info(
                 f"LatencyArb reject [{asset}]: {timeframe} reason=cvd_opposes_fasttrack "
                 f"cvd={_cvd:.3f} threshold=±{settings.LAB_CVD_FASTTRACK_BLOCK_THRESHOLD} path=FAST_TRACK"
+            )
+            return False
+
+        # ── Zero oracle lag block for FAST_TRACK ─────────────────────────────
+        # FAST_TRACK fires when Binance moves ≥1.7× threshold. When binance_move=0%
+        # AND pm_dist<0.010 simultaneously, there is no Binance move (threshold met
+        # by accumulated drift, not a real spike) and the token is already at fair
+        # value — no oracle lag to exploit. Historical: 10 such trades, 30% WR,
+        # -$113 net. All 3 "wins" were random; all 7 losses were predictable.
+        if (entry_path == "FAST_TRACK"
+                and _binance_move is not None
+                and _binance_move == 0.0
+                and _pm_from_neutral is not None
+                and _pm_from_neutral < 0.010):
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=ft_zero_lag "
+                f"binance_move=0.0% pm_dist={_pm_from_neutral:.3f} path=FAST_TRACK"
             )
             return False
 
