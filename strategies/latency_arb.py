@@ -17,6 +17,7 @@ from datetime import datetime
 from config import settings
 from core.ml_model import get_ml_model
 from data.exchange_feed import get_exchange_feed
+from data.liquidation_feed import get_liquidation_feed
 from data.market_scanner import get_scanner
 from data.polymarket_feed import get_polymarket_feed
 from data.rtds_feed import get_rtds_feed
@@ -56,6 +57,7 @@ class LatencyArb(BaseStrategy):
     def __init__(self):
         super().__init__()
         self._exchange_feed = get_exchange_feed()
+        self._liq_feed = get_liquidation_feed()
         self._scanner = get_scanner()
         self._pm_feed = get_polymarket_feed()
         self._rtds_feed = get_rtds_feed()
@@ -489,6 +491,37 @@ class LatencyArb(BaseStrategy):
                 entry_path="RESOLUTION_ARB",
             )
             return True
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Regime gate (vol ratio + liquidation cascade) ─────────────────────
+        # Approach 2: realized-vol ratio gate.
+        #   elevated (1.5–2.5×): CONFIRMED only blocked — weaker signal, loses money
+        #                        in choppy high-vol markets.
+        #   high/crash (>2.5×):  all paths blocked — momentum signals are unreliable
+        #                        dead-cat-bounce territory.
+        # Approach 4: liquidation cascade gate.
+        #   When Binance futures show $20M BTC / $3M XRP / $2M SOL liquidated in 5 min,
+        #   a cascade is in progress. Every UP signal during a cascade is a bounce in
+        #   an active waterfall. Pause for LIQ_CASCADE_PAUSE_SECS (15 min default).
+        # RESOLUTION_ARB is always exempt — near-expiry certainty overrides regime.
+        _vol_regime   = self._exchange_feed.get_vol_regime(symbol)
+        _cascade      = self._liq_feed.is_cascade_active(asset)
+        _vol_ratio    = self._exchange_feed.get_vol_ratio(symbol)
+
+        if _cascade or _vol_regime in ("high", "crash"):
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=regime_gate "
+                f"regime={_vol_regime} cascade={_cascade} vol_ratio={_vol_ratio:.2f}x "
+                f"path={entry_path}"
+            )
+            return False
+
+        if _vol_regime == "elevated" and entry_path == "CONFIRMED":
+            logger.info(
+                f"LatencyArb reject [{asset}]: {timeframe} reason=regime_gate_elevated "
+                f"vol_ratio={_vol_ratio:.2f}x path=CONFIRMED"
+            )
+            return False
         # ─────────────────────────────────────────────────────────────────────
 
         direction = self._direction_from_momentum(momentum, required_momentum)

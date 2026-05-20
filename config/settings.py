@@ -173,6 +173,26 @@ LAB_PRICE_MULT: float = _float("LAB_PRICE_MULT", 0.5)
 # Set to "" to fall back to using the other trading asset (SOL↔XRP).
 LAB_CROSS_ASSET_VALIDATOR: str = os.getenv("LAB_CROSS_ASSET_VALIDATOR", "BTC")
 
+# ── Regime Gate — volatility ratio + liquidation cascade ─────────────────────
+# Vol ratio = std(5-min returns) / std(30-min returns).
+# Ratios above the thresholds below activate progressively stricter gates:
+#   elevated (1.5–2.5): block CONFIRMED entries only
+#   high     (2.5–3.5): block all entries (FAST_TRACK, CONFIRMED, 5M_DIRECT)
+#   crash    (>3.5)   : same as high, plus alert
+VOL_RATIO_ELEVATED: float = _float("VOL_RATIO_ELEVATED", 1.5)
+VOL_RATIO_HIGH:     float = _float("VOL_RATIO_HIGH",     2.5)
+VOL_RATIO_CRASH:    float = _float("VOL_RATIO_CRASH",    3.5)
+
+# Liquidation cascade gate.
+# When the rolling 5-minute liquidation volume on Binance futures crosses these
+# thresholds, all entries for that asset (and all assets for BTC) are paused
+# for LIQ_CASCADE_PAUSE_SECS seconds.
+LIQ_CASCADE_PAUSE_SECS:     int   = _int("LIQ_CASCADE_PAUSE_SECS",   900)   # 15 min
+LIQ_CASCADE_WINDOW_SECS:    float = _float("LIQ_CASCADE_WINDOW_SECS", 300.0) # 5 min
+LIQ_CASCADE_BTC_USD:        float = _float("LIQ_CASCADE_BTC_USD",  20_000_000.0)  # $20M
+LIQ_CASCADE_XRP_USD:        float = _float("LIQ_CASCADE_XRP_USD",   3_000_000.0)  # $3M
+LIQ_CASCADE_SOL_USD:        float = _float("LIQ_CASCADE_SOL_USD",   2_000_000.0)  # $2M
+
 # ── Latency Arb Active Exit ───────────────────────────────────────────────────
 LAB_EXIT_ENABLED: bool = _bool("LAB_EXIT_ENABLED", True)
 LAB_STOP_LOSS_PCT: float = _float("LAB_STOP_LOSS_PCT", 0.35)

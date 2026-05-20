@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from collections import deque
 from typing import Optional
 
 import aiohttp
 
+from config import settings
 from utils.logger import logger
 
 
@@ -44,6 +46,8 @@ _MOMENTUM_WINDOW = 10.0    # seconds of trade history for momentum calculation
 _CVD_WINDOW = 10.0         # seconds of aggTrade history for CVD (taker volume delta)
                            # Research: trade-based OFI predicts 5–30s ahead; 10s matches momentum window.
 _LOG_EVERY_N_TRADES = 100  # log a DEBUG price line once per N trades
+_VOL_SAMPLE_INTERVAL = 10.0  # seconds between price samples for vol ratio
+_VOL_HISTORY_MAXLEN  = 360   # 360 × 10s = 60 min of log-return history
 
 
 class ExchangeFeed:
@@ -77,6 +81,15 @@ class ExchangeFeed:
         self._trade_counts: dict[str, int] = {sym: 0 for sym in _BINANCE_STREAMS}
         self._window_seconds = _MOMENTUM_WINDOW
         self._ob_imbalance: dict[str, float | None] = {}
+
+        # Vol ratio: sample one price every _VOL_SAMPLE_INTERVAL seconds per symbol,
+        # store the log-return between consecutive samples.
+        # Short window (5 min) / medium window (30 min) ratio detects crash regimes.
+        self._vol_returns: dict[str, deque] = {
+            sym: deque(maxlen=_VOL_HISTORY_MAXLEN) for sym in _BINANCE_STREAMS
+        }
+        self._vol_last_sample_ts:    dict[str, float] = {}
+        self._vol_last_sample_price: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -144,6 +157,62 @@ class ExchangeFeed:
         if total_abs == 0:
             return None
         return net / total_abs
+
+    def get_vol_ratio(self, symbol: str) -> float:
+        """
+        Realized-volatility ratio: std(5-min log-returns) / std(30-min log-returns).
+
+        > 1.0  = current volatility above recent baseline
+        > 2.5  = high-vol regime (crash / cascade likely)
+        > 3.5  = crash regime
+
+        Returns 1.0 when there are fewer than 30 samples (first ~5 min after start).
+        """
+        if "/" not in symbol:
+            symbol = f"{symbol}/USDT"
+        rets = self._vol_returns.get(symbol)
+        if rets is None or len(rets) < 30:
+            return 1.0
+
+        now = time.time()
+        short_cutoff  = now - 300    # 5 min
+        medium_cutoff = now - 1800   # 30 min
+
+        short_rets  = [r for ts, r in rets if ts >= short_cutoff]
+        medium_rets = [r for ts, r in rets if ts >= medium_cutoff]
+
+        if len(short_rets) < 5 or len(medium_rets) < 20:
+            return 1.0
+
+        def _std(vals: list) -> float:
+            n = len(vals)
+            if n < 2:
+                return 0.0
+            mean = sum(vals) / n
+            return math.sqrt(sum((v - mean) ** 2 for v in vals) / (n - 1))
+
+        medium_vol = _std(medium_rets)
+        if medium_vol == 0.0:
+            return 1.0
+        return _std(short_rets) / medium_vol
+
+    def get_vol_regime(self, symbol: str) -> str:
+        """
+        Map vol ratio to a regime label.
+
+        'normal'   — ratio < VOL_RATIO_ELEVATED  (no restrictions)
+        'elevated' — ratio 1.5–2.5               (block CONFIRMED only)
+        'high'     — ratio 2.5–3.5               (block all new entries)
+        'crash'    — ratio > 3.5                 (block all + alert)
+        """
+        ratio = self.get_vol_ratio(symbol)
+        if ratio >= settings.VOL_RATIO_CRASH:
+            return "crash"
+        if ratio >= settings.VOL_RATIO_HIGH:
+            return "high"
+        if ratio >= settings.VOL_RATIO_ELEVATED:
+            return "elevated"
+        return "normal"
 
     async def run(self) -> None:
         """Start the feed. Blocks until stop() is called."""
@@ -352,6 +421,17 @@ class ExchangeFeed:
         cutoff_cvd = now - _CVD_WINDOW
         while cvd_buf and cvd_buf[0][0] < cutoff_cvd:
             cvd_buf.popleft()
+
+        # Vol ratio sampling — one price sample per _VOL_SAMPLE_INTERVAL seconds.
+        # On each sample, compute log-return vs previous sample and append to deque.
+        last_ts = self._vol_last_sample_ts.get(symbol, 0.0)
+        if now - last_ts >= _VOL_SAMPLE_INTERVAL:
+            prev_price = self._vol_last_sample_price.get(symbol)
+            if prev_price and prev_price > 0:
+                log_ret = math.log(price / prev_price)
+                self._vol_returns[symbol].append((now, log_ret))
+            self._vol_last_sample_ts[symbol]    = now
+            self._vol_last_sample_price[symbol] = price
 
         # Periodic debug log — every N trades
         self._trade_counts[symbol] = self._trade_counts.get(symbol, 0) + 1

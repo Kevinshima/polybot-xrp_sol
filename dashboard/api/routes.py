@@ -6,7 +6,10 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime
-from fastapi import APIRouter
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 from sqlalchemy import func
 
@@ -118,6 +121,117 @@ async def kill_switch():
 async def resume():
     get_risk_manager().resume()
     return {"status": "ok", "message": "Bot resumed"}
+
+
+# ── Live config (no restart required) ────────────────────────────────────────
+
+# Whitelist of settings that can be patched at runtime.
+# Each entry: key → (type, applies_to_risk_manager_attr_or_None)
+_PATCHABLE: dict[str, tuple[type, str | None]] = {
+    "LAB_BASE_SIZE_USDC":               (float, None),
+    "MAX_POSITION_SIZE_USDC":           (float, "max_position_usdc"),
+    "DAILY_LOSS_CAP_USDC":              (float, "daily_loss_cap"),
+    "MAX_OPEN_ORDERS":                  (int,   "max_open_orders"),
+    "LAB_MAX_CONCURRENT_POSITIONS":     (int,   None),
+    "LAB_MAX_CONCURRENT_POSITIONS_5M":  (int,   None),
+    "LAB_MAX_CONCURRENT_POSITIONS_15M": (int,   None),
+    "LAB_STOP_LOSS_PCT":                (float, None),
+    "LAB_TAKE_PROFIT_PCT":              (float, None),
+    "DRY_RUN":                          (bool,  None),
+    "SOL_LAB_ENABLED":                  (bool,  None),
+    "XRP_LAB_ENABLED":                  (bool,  None),
+    "VOL_RATIO_ELEVATED":               (float, None),
+    "VOL_RATIO_HIGH":                   (float, None),
+    "VOL_RATIO_CRASH":                  (float, None),
+    "LIQ_CASCADE_BTC_USD":              (float, None),
+    "LIQ_CASCADE_XRP_USD":              (float, None),
+    "LIQ_CASCADE_SOL_USD":              (float, None),
+    "LIQ_CASCADE_PAUSE_SECS":           (int,   None),
+}
+
+
+def _env_path() -> Path:
+    from config import settings as _s
+    return Path(_s.__file__).parent.parent / ".env"
+
+
+def _write_env(key: str, value: Any) -> None:
+    """Update a single KEY=VALUE line in .env so the change survives restart."""
+    env_file = _env_path()
+    if not env_file.exists():
+        return
+    text = env_file.read_text()
+    str_val = str(value).lower() if isinstance(value, bool) else str(value)
+    pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
+    if pattern.search(text):
+        text = pattern.sub(f"{key}={str_val}", text)
+    else:
+        text = text.rstrip("\n") + f"\n{key}={str_val}\n"
+    env_file.write_text(text)
+
+
+@router.get("/config")
+async def get_config():
+    """Current values of all live-patchable settings."""
+    from config import settings as _s
+    return {k: getattr(_s, k, None) for k in _PATCHABLE}
+
+
+@router.patch("/config")
+async def patch_config(updates: dict[str, Any] = Body(...)):
+    """
+    Update one or more settings live — no restart required.
+
+    Changes take effect immediately in-memory AND are written back to .env
+    so they persist across restarts.
+
+    Example:
+        PATCH /api/config
+        {"LAB_BASE_SIZE_USDC": 50, "DAILY_LOSS_CAP_USDC": 200}
+    """
+    from config import settings as _s
+    risk = get_risk_manager()
+    applied: dict[str, Any] = {}
+    rejected: dict[str, str] = {}
+
+    for key, raw_val in updates.items():
+        if key not in _PATCHABLE:
+            rejected[key] = "not in patchable whitelist"
+            continue
+
+        expected_type, risk_attr = _PATCHABLE[key]
+        try:
+            if expected_type is bool:
+                # Accept both bool and string ("true"/"false")
+                if isinstance(raw_val, str):
+                    value = raw_val.lower() in ("true", "1", "yes")
+                else:
+                    value = bool(raw_val)
+            else:
+                value = expected_type(raw_val)
+        except (ValueError, TypeError) as exc:
+            rejected[key] = f"type error: {exc}"
+            continue
+
+        # Apply to settings module
+        setattr(_s, key, value)
+
+        # Mirror into risk manager if needed
+        if risk_attr:
+            setattr(risk, risk_attr, value)
+
+        # Persist to .env
+        try:
+            _write_env(key, value)
+        except Exception as exc:
+            # .env write failure is non-fatal — in-memory change still applied
+            rejected[key] = f"applied in-memory but .env write failed: {exc}"
+            applied[key] = value
+            continue
+
+        applied[key] = value
+
+    return {"applied": applied, "rejected": rejected}
 
 
 @router.get("/health")

@@ -13,6 +13,7 @@ from core.portfolio import get_portfolio
 from core.risk_manager import get_risk_manager
 from bot.heartbeat import Heartbeat
 from data.exchange_feed import get_exchange_feed
+from data.liquidation_feed import get_liquidation_feed
 from data.polymarket_feed import get_polymarket_feed
 from data.rtds_feed import get_rtds_feed
 from database import db
@@ -108,6 +109,7 @@ async def run() -> None:
     risk = get_risk_manager()
     order_manager = get_order_manager()
     exchange_feed = get_exchange_feed()
+    liquidation_feed = get_liquidation_feed()
     polymarket_feed = get_polymarket_feed()
     rtds_feed = get_rtds_feed()
 
@@ -171,6 +173,8 @@ async def run() -> None:
 
     # Exchange data feed (needed for latency arb)
     tasks.append(asyncio.create_task(exchange_feed.run(), name="exchange_feed"))
+    # Binance futures liquidation stream — cascade regime detector
+    tasks.append(asyncio.create_task(liquidation_feed.run(), name="liquidation_feed"))
     # Polymarket real-time market feed — orderbook + last_trade_price events
     tasks.append(asyncio.create_task(polymarket_feed.run(), name="polymarket_feed"))
     # RTDS feed — Chainlink oracle prices for independent confirmation
@@ -217,6 +221,11 @@ async def run() -> None:
         await exchange_feed.stop()
     except Exception as exc:
         logger.error(f"exchange_feed stop failed: {exc}")
+
+    try:
+        await liquidation_feed.stop()
+    except Exception as exc:
+        logger.error(f"liquidation_feed stop failed: {exc}")
 
     try:
         await polymarket_feed.stop()
