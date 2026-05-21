@@ -195,8 +195,26 @@ LIQ_CASCADE_SOL_USD:        float = _float("LIQ_CASCADE_SOL_USD",   2_000_000.0)
 
 # ── Latency Arb Active Exit ───────────────────────────────────────────────────
 LAB_EXIT_ENABLED: bool = _bool("LAB_EXIT_ENABLED", True)
+
+# Legacy fixed exits — kept for reference / alerting, no longer used for exit logic.
 LAB_STOP_LOSS_PCT: float = _float("LAB_STOP_LOSS_PCT", 0.35)
 LAB_TAKE_PROFIT_PCT: float = _float("LAB_TAKE_PROFIT_PCT", 0.50)
+
+# ── Trailing exit ─────────────────────────────────────────────────────────────
+# Replaces fixed stop-loss / take-profit with a trailing distance from peak price.
+# Three tiers based on how high the token has moved:
+#   Normal  (peak < TRAIL_HIGH_THRESHOLD):  trail 15¢ — wide room for noise
+#   High    (peak ≥ TRAIL_HIGH_THRESHOLD):  trail  8¢ — lock in gains
+#   Hold    (peak ≥ TRAIL_HOLD_THRESHOLD):  trail  5¢ — near resolution, let resolver win
+#
+# Hard floor = entry × (1 − TRAIL_FLOOR_PCT): safety net for flash crashes that
+# blow through the trail before the 10s heartbeat can react.
+LAB_TRAIL_NORMAL:         float = _float("LAB_TRAIL_NORMAL",         0.15)
+LAB_TRAIL_HIGH:           float = _float("LAB_TRAIL_HIGH",            0.08)
+LAB_TRAIL_HOLD:           float = _float("LAB_TRAIL_HOLD",            0.05)
+LAB_TRAIL_HIGH_THRESHOLD: float = _float("LAB_TRAIL_HIGH_THRESHOLD",  0.85)
+LAB_TRAIL_HOLD_THRESHOLD: float = _float("LAB_TRAIL_HOLD_THRESHOLD",  0.93)
+LAB_TRAIL_FLOOR_PCT:      float = _float("LAB_TRAIL_FLOOR_PCT",       0.30)
 
 # ── Latency Arb Entry Guards ──────────────────────────────────────────────────
 LAB_CONSEC_LOSS_PAUSE: int = _int("LAB_CONSEC_LOSS_PAUSE", 3)

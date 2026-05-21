@@ -43,6 +43,9 @@ class Heartbeat:
         self._consec_losses = 0
         self._consec_loss_total = 0.0
         self._last_trade_ts: float = time.time()
+        # Trailing exit state: highest price seen since entry, keyed by market_id.
+        # Initialised to entry_price on first check; updated upward on every tick.
+        self._peak_prices: dict[str, float] = {}
 
     async def run(self) -> None:
         self._running = True
@@ -166,13 +169,36 @@ class Heartbeat:
             asset = str(meta.get("asset") or "SOL")
 
             entry_path = meta.get("entry_path", "")
-            direction = meta.get("direction", "")
+            direction  = meta.get("direction", "")
+
+            # ── Trailing exit ─────────────────────────────────────────────────
+            # Track the highest price seen since entry (all positions are BUY —
+            # both UP and DOWN tokens increase toward 1.0 when correct).
+            market_id = pos.market_id
+            peak = max(self._peak_prices.get(market_id, entry), current_price)
+            self._peak_prices[market_id] = peak
+
+            # Trail distance tightens as peak climbs:
+            #   normal  (peak < 0.85) → 15¢ wide — leaves room for noise
+            #   high    (peak ≥ 0.85) →  8¢ tight — lock in significant gain
+            #   hold    (peak ≥ 0.93) →  5¢ — near resolution, resolver takes over
+            if peak >= settings.LAB_TRAIL_HOLD_THRESHOLD:
+                trail_dist = settings.LAB_TRAIL_HOLD
+            elif peak >= settings.LAB_TRAIL_HIGH_THRESHOLD:
+                trail_dist = settings.LAB_TRAIL_HIGH
+            else:
+                trail_dist = settings.LAB_TRAIL_NORMAL
+
+            trail_level = peak - trail_dist
+            hard_floor  = entry * (1.0 - settings.LAB_TRAIL_FLOOR_PCT)
 
             exit_reason: Optional[str] = None
-            if current_price <= entry * (1 - settings.LAB_STOP_LOSS_PCT):
+            if current_price <= hard_floor:
+                # Flash-crash blew through trail — safety net exit
                 exit_reason = "stop_loss"
-            elif current_price >= entry * (1 + settings.LAB_TAKE_PROFIT_PCT):
-                exit_reason = "take_profit"
+            elif current_price <= trail_level:
+                # Trailing stop fired: price fell trail_dist from peak
+                exit_reason = "trail_stop"
             elif (
                 entry_path == "CONFIRMED"
                 and direction
@@ -181,16 +207,20 @@ class Heartbeat:
                 and self._latency_arb.is_signal_reversed(asset, direction, entry_path, pos.token_id)
             ):
                 exit_reason = "signal_reversed"
+            # ─────────────────────────────────────────────────────────────────
 
             if not exit_reason:
                 continue
 
-            pnl = self._portfolio.close_position(pos.market_id, current_price)
+            pnl = self._portfolio.close_position(market_id, current_price)
             if pnl is None:
                 continue
 
+            # Clean up trailing state for this position
+            self._peak_prices.pop(market_id, None)
+
             db.update_trades_for_market(
-                pos.market_id,
+                market_id,
                 fill_price=current_price,
                 pnl=pnl,
                 exit_reason=exit_reason,
@@ -198,8 +228,8 @@ class Heartbeat:
             self._risk.record_fill(pnl)
             logger.info(
                 f"LatencyArb EXIT [{exit_reason}] {pos.question[:40]}… "
-                f"entry={entry:.3f} current={current_price:.3f} "
-                f"PnL={pnl:+.4f} USDC ({asset} {timeframe})"
+                f"entry={entry:.3f} peak={peak:.3f} trail_lvl={trail_level:.3f} "
+                f"current={current_price:.3f} PnL={pnl:+.4f} USDC ({asset} {timeframe})"
             )
             await self._alerter.trade_closed(
                 asset=asset, timeframe=timeframe,
@@ -214,7 +244,7 @@ class Heartbeat:
             if self._latency_arb is not None:
                 if pnl > 0:
                     self._latency_arb.on_win(timeframe, asset)
-                elif exit_reason in ("stop_loss", "signal_reversed"):
+                elif exit_reason in ("stop_loss", "trail_stop", "signal_reversed"):
                     self._latency_arb.on_stop_loss(timeframe, asset)
                 else:
                     self._latency_arb.on_loss(timeframe, asset)
