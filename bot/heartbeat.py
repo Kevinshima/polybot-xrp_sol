@@ -24,9 +24,10 @@ class Heartbeat:
     - Cancels all orders on exit
     """
 
-    PING_INTERVAL = 30
-    SNAPSHOT_INTERVAL = 300
-    RESOLVER_INTERVAL = 60
+    PING_INTERVAL      = 30   # API balance check — keep at 30s to avoid rate-limits
+    POSITION_INTERVAL  = 10   # stop-loss / take-profit check — 10s cuts slippage ~50%
+    SNAPSHOT_INTERVAL  = 300
+    RESOLVER_INTERVAL  = 60
 
     def __init__(self, client, portfolio, risk_manager, latency_arb=None):
         self._client = client
@@ -35,9 +36,10 @@ class Heartbeat:
         self._latency_arb = latency_arb
         self._alerter = get_alerter()
         self._running = False
+        self._last_ping     = 0.0
         self._last_snapshot = 0.0
-        self._last_resolve = 0.0
-        self._last_reprice = 0.0
+        self._last_resolve  = 0.0
+        self._last_reprice  = 0.0
         self._consec_losses = 0
         self._consec_loss_total = 0.0
         self._last_trade_ts: float = time.time()
@@ -58,9 +60,13 @@ class Heartbeat:
             except Exception as exc:
                 logger.warning(f"Heartbeat error: {exc}")
 
-            await asyncio.sleep(self.PING_INTERVAL)
+            await asyncio.sleep(self.POSITION_INTERVAL)
 
     async def _ping(self) -> None:
+        now = time.time()
+        if now - self._last_ping < self.PING_INTERVAL:
+            return
+        self._last_ping = now
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(None, self._client.get_balance)
