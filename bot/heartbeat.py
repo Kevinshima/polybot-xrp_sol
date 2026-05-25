@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import aiohttp
 
 from config import settings
+from data.polymarket_feed import get_polymarket_feed
 from database import db
 from monitoring.alerter import get_alerter
 from utils.logger import logger
@@ -46,12 +47,34 @@ class Heartbeat:
         # Trailing exit state: highest price seen since entry, keyed by market_id.
         # Initialised to entry_price on first check; updated upward on every tick.
         self._peak_prices: dict[str, float] = {}
+        self._pm_feed = get_polymarket_feed()
 
     async def run(self) -> None:
         self._running = True
         logger.info("Heartbeat started")
+        _price_queue = self._pm_feed.get_price_queue()
 
         while self._running:
+            # When positions are open, wake immediately on any Polymarket WS
+            # price event so trail stops fire at the actual breach price rather
+            # than up to POSITION_INTERVAL seconds later.  When idle, fall back
+            # to the normal timer so ping / snapshot / resolve still run.
+            if self._portfolio.all_positions():
+                try:
+                    await asyncio.wait_for(
+                        _price_queue.get(), timeout=self.POSITION_INTERVAL
+                    )
+                    # Drain accumulated events — one check covers all of them
+                    while not _price_queue.empty():
+                        try:
+                            _price_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                except asyncio.TimeoutError:
+                    pass  # no WS event in 10s — run safety-net check anyway
+            else:
+                await asyncio.sleep(self.POSITION_INTERVAL)
+
             try:
                 await self._ping()
                 await self._maybe_reprice_positions()
@@ -62,8 +85,6 @@ class Heartbeat:
                 raise
             except Exception as exc:
                 logger.warning(f"Heartbeat error: {exc}")
-
-            await asyncio.sleep(self.POSITION_INTERVAL)
 
     async def _ping(self) -> None:
         now = time.time()
@@ -148,17 +169,23 @@ class Heartbeat:
             # Fetch live midpoint from CLOB to avoid stop-loss slippage caused
             # by stale prices (pos.current_price is only updated every ~120s by
             # _maybe_reprice_positions, which is far too slow for 5m markets).
-            current_price = pos.current_price  # fallback if CLOB unavailable
+            current_price = pos.current_price  # fallback if both WS and CLOB unavailable
             if pos.token_id:
-                try:
-                    live_mid = await loop.run_in_executor(
-                        None, self._client.get_midpoint, pos.token_id
-                    )
-                    if live_mid is not None and float(live_mid) > 0:
-                        current_price = float(live_mid)
-                        pos.current_price = current_price  # keep in sync
-                except Exception:
-                    pass  # 404 = expired market; let _maybe_resolve_positions handle it
+                ws_mid = self._pm_feed.get_mid(pos.token_id)
+                if ws_mid is not None and ws_mid > 0:
+                    current_price = ws_mid
+                    pos.current_price = current_price
+                else:
+                    # WS price stale or not yet received — fall back to HTTP
+                    try:
+                        live_mid = await loop.run_in_executor(
+                            None, self._client.get_midpoint, pos.token_id
+                        )
+                        if live_mid is not None and float(live_mid) > 0:
+                            current_price = float(live_mid)
+                            pos.current_price = current_price
+                    except Exception:
+                        pass  # 404 = expired market; let _maybe_resolve_positions handle it
 
             if not current_price or current_price <= 0:
                 continue
@@ -170,6 +197,24 @@ class Heartbeat:
 
             entry_path = meta.get("entry_path", "")
             direction  = meta.get("direction", "")
+
+            # ── Window-expiry guard ───────────────────────────────────────────
+            # After the 5m/15m window closes, the token enters a resolution
+            # process where its price can be anywhere between 0 and 1 before
+            # settling at 0 or 1.  The WS-driven heartbeat would otherwise fire
+            # a trail_stop on that intermediate price, converting a potential
+            # resolution win into a loss.  If the window has expired, skip trail
+            # management entirely and let _maybe_resolve_positions handle it.
+            window_slug = meta.get("window_slug", "")
+            if window_slug:
+                try:
+                    win_ts  = int(window_slug.rsplit("-", 1)[-1])
+                    win_dur = 300 if timeframe == "5m" else 900
+                    if now > win_ts + win_dur:
+                        continue  # expired — resolver owns this position now
+                except (ValueError, IndexError):
+                    pass
+            # ─────────────────────────────────────────────────────────────────
 
             # ── Trailing exit ─────────────────────────────────────────────────
             # Track the highest price seen since entry (all positions are BUY —

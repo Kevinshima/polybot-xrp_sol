@@ -209,7 +209,7 @@ LAB_TAKE_PROFIT_PCT: float = _float("LAB_TAKE_PROFIT_PCT", 0.50)
 #
 # Hard floor = entry × (1 − TRAIL_FLOOR_PCT): safety net for flash crashes that
 # blow through the trail before the 10s heartbeat can react.
-LAB_TRAIL_NORMAL:         float = _float("LAB_TRAIL_NORMAL",         0.15)
+LAB_TRAIL_NORMAL:         float = _float("LAB_TRAIL_NORMAL",         0.10)
 LAB_TRAIL_HIGH:           float = _float("LAB_TRAIL_HIGH",            0.08)
 LAB_TRAIL_HOLD:           float = _float("LAB_TRAIL_HOLD",            0.05)
 LAB_TRAIL_HIGH_THRESHOLD: float = _float("LAB_TRAIL_HIGH_THRESHOLD",  0.85)

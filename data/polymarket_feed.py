@@ -39,6 +39,9 @@ class PolymarketFeed:
         self._last_trade_ts: dict[str, float] = {}  # token_id → timestamp of last executed trade
         self._all_ids: set[str] = set()          # all tokens we ever want subscribed
         self._running = False
+        # Broadcast queue — one entry per price event; consumed by Heartbeat for
+        # event-driven trail-stop checks instead of polling every 10 seconds.
+        self._price_events: asyncio.Queue = asyncio.Queue(maxsize=500)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -102,6 +105,10 @@ class PolymarketFeed:
             if self._running:
                 logger.info(f"PolymarketFeed reconnecting in {_RECONNECT_DELAY:.0f}s")
                 await asyncio.sleep(_RECONNECT_DELAY)
+
+    def get_price_queue(self) -> asyncio.Queue:
+        """Return the broadcast queue for event-driven exit management."""
+        return self._price_events
 
     async def stop(self) -> None:
         self._running = False
@@ -221,6 +228,11 @@ class PolymarketFeed:
                 "best_bid": best_bid,
                 "ts": time.time(),
             }
+            # Wake any waiting heartbeat trail-stop checker
+            try:
+                self._price_events.put_nowait(asset_id)
+            except asyncio.QueueFull:
+                pass  # consumer is behind — next event will wake it
             logger.debug(
                 f"PolymarketFeed {asset_id[:16]}… "
                 f"bid={f'{best_bid:.4f}' if best_bid else 'n/a'} "

@@ -302,7 +302,7 @@ class LatencyArb(BaseStrategy):
             )
 
         # Resolution arb: near-window-end entries on clearly-resolved markets
-        await self._resolution_arb_check(asset, can_trade_15m, branch_open_count, total_open_count)
+        await self._resolution_arb_check(asset, total_open_count)
 
         can_trade_5m, reason_5m, cooldown_state_5m = self._branch_trade_availability(
             asset, "5m", branch_open_count, total_open_count
@@ -451,7 +451,9 @@ class LatencyArb(BaseStrategy):
 
         # ── Strategy-level circuit breaker ────────────────────────────────────
         # Blocks ALL new entries when 3+ stop-losses have hit in the last 90 min.
-        if time.time() < self._circuit_breaker_until:
+        # 5M_DIRECT is exempt: it fires on independent momentum spikes and has a
+        # 62% WR — silencing it during 15m-loss CB pauses costs ~$110/day.
+        if time.time() < self._circuit_breaker_until and entry_path != "5M_DIRECT":
             _cb_rem = int(self._circuit_breaker_until - time.time())
             logger.info(
                 f"LatencyArb reject [{asset}]: {timeframe} reason=circuit_breaker "
@@ -728,6 +730,12 @@ class LatencyArb(BaseStrategy):
                 else:
                     ob_mult = settings.LAB_OB_SIZE_WEAK
                     ob_tier = "CVD_WEAK"
+            # 5M_DIRECT: oracle lag is the edge — CVD direction is irrelevant.
+            # Data: CVD-opposing 5m entries → 69% WR, +$24/trade (best tier).
+            # The 0.50x CVD_WEAK penalty halves winning positions for no reason.
+            if entry_path == "5M_DIRECT" and ob_tier == "CVD_WEAK":
+                ob_mult = 1.0
+                ob_tier = "CVD_NEUTRAL"
             size_usdc = size_usdc * ob_mult
             logger.info(
                 f"LatencyArb CVD sizing ({asset}): cvd={cvd_str} "
@@ -1100,22 +1108,36 @@ class LatencyArb(BaseStrategy):
             if old_slug:
                 self._entered_15m_slugs.discard(old_slug)
             self._last_15m_slug[key] = current_slug
+            # Capture true window-open Binance price on slug rollover — independent of
+            # whether momentum ever crosses the signal threshold (fixes RESOLUTION_ARB blind spot).
+            if current_slug not in self._window_open_snapshots:
+                snap_price = self._exchange_feed.get_price(f"{asset}/USDT")
+                if snap_price and snap_price > 0:
+                    self._window_open_snapshots[current_slug] = {
+                        "binance_price": snap_price,
+                        "ts": time.time(),
+                    }
+                    logger.debug(
+                        f"LatencyArb: window-open snapshot [{asset}] {current_slug} "
+                        f"binance={snap_price:.4f}"
+                    )
 
     async def _resolution_arb_check(
         self,
         asset: str,
-        can_trade: bool,
-        branch_open_count: dict,
         total_open_count: int,
     ) -> None:
         """
         Near-resolution arb: when a 15m window has < LAB_RESOLUTION_SECS_REMAINING left
         AND Binance has clearly moved since window open, buy the winning token if it's
         still not fully priced by Polymarket.
+
+        Exempt from the 15m branch capacity limit — it's a 2-3 min hold, not a full
+        15m position. Still respects the global MAX_CONCURRENT cap.
         """
         if not settings.LAB_RESOLUTION_ARB_ENABLED:
             return
-        if not can_trade:
+        if total_open_count >= self.MAX_CONCURRENT:
             return
 
         market_15m = self._get_market_if_fresh(f"{asset}_15m")
